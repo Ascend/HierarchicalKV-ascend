@@ -212,7 +212,8 @@ LAUNCH_BOUND(THREAD_NUM) inline void insert_and_evict_kernel_with_digest_vf(
     uint64_t n, uint32_t thread_all, uint64_t global_epoch,
     uint32_t block_index, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
-    uint64_t n_align_warp) {
+    uint64_t n_align_warp, __ubuf__ uint32_t* block_acc,
+    __ubuf__ uint64_t* global_acc) {
   if (buckets_addr_gm == nullptr || buckets_size_addr_gm == nullptr) {
     return;
   }
@@ -453,7 +454,10 @@ LAUNCH_BOUND(THREAD_NUM) inline void insert_and_evict_kernel_with_digest_vf(
         res_sync = __shfl(occupy_result, i, EVICT_GROUP_SIZE);
       }
     }
-
+    if (threadIdx.x == 0) {
+      *block_acc = 0;
+    }
+    AscendC::Simt::ThreadBarrier();
     // 5. 前缀和计算偏移：每个 GROUP 只做一次 atomicAdd
     auto rank = threadIdx.x % COUNT_GROUP_SIZE;
 
@@ -476,14 +480,20 @@ LAUNCH_BOUND(THREAD_NUM) inline void insert_and_evict_kernel_with_digest_vf(
     uint32_t group_evict_count = __shfl(prefix_sum, COUNT_GROUP_SIZE - 1, COUNT_GROUP_SIZE);
 
     // 5.4 组内第一个线程做 atomicAdd 获取基地址
-    uint64_t group_base = 0;
+    uint32_t group_base = 0;
     if (rank == 0 && group_evict_count > 0) {
-      group_base = atomicAdd(d_evicted_counter, group_evict_count);
+      group_base = atomicAdd(block_acc, group_evict_count);
     }
     group_base = __shfl(group_base, 0, COUNT_GROUP_SIZE);
 
+    AscendC::Simt::ThreadBarrier();
+    if (threadIdx.x == 0) {
+      *global_acc = atomicAdd(d_evicted_counter, *block_acc);
+    }
+    AscendC::Simt::ThreadBarrier();
+
     // 5.5 计算最终的 evicted_idx
-    uint64_t evicted_idx = group_base + local_offset;
+    uint64_t evicted_idx = *global_acc + group_base + local_offset;
 
     // 5.6 写入 evicted_keys 和 evicted_scores
     if (need_evict) {
