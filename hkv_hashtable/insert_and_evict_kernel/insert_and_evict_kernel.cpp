@@ -30,6 +30,23 @@ extern "C" __global__ __aicore__ void insert_and_evict_kernel(
     uint64_t capacity_divisor_shift, uint64_t n_align_warp, int32_t group_size) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
+  AscendC::TPipe pipe;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> block_acc;
+  pipe.InitBuffer(block_acc, sizeof(uint32_t));
+  AscendC::LocalTensor<uint32_t> shared_block_acc_tensor =
+      block_acc.Get<uint32_t>();
+  __ubuf__ uint32_t* ub_shared_block_acc_mem =
+      reinterpret_cast<__ubuf__ uint32_t*>(
+          shared_block_acc_tensor.GetPhyAddr());
+
+  AscendC::TBuf<AscendC::TPosition::VECCALC> global_acc;
+  pipe.InitBuffer(global_acc, sizeof(uint64_t));
+  AscendC::LocalTensor<uint64_t> shared_global_acc_tensor =
+      global_acc.Get<uint64_t>();
+  __ubuf__ uint64_t* ub_shared_global_acc_mem =
+      reinterpret_cast<__ubuf__ uint64_t*>(
+          shared_global_acc_tensor.GetPhyAddr());
+
   const uint32_t thread_all = THREAD_NUM * GetBlockNum();
   uint64_t cur_score =
       (evict_strategy == npu::hkv::EvictStrategyInternal::kLru ||
@@ -51,5 +68,5 @@ extern "C" __global__ __aicore__ void insert_and_evict_kernel(
                   evicted_scores, d_evicted_counter, n, thread_all,
                   global_epoch, GetBlockIdx(), max_bucket_shift,
                   capacity_divisor_magic, capacity_divisor_shift,
-                  n_align_warp)))));
+                  n_align_warp, ub_shared_block_acc_mem, ub_shared_global_acc_mem)))));
 }
