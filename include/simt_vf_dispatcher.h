@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
 #ifndef ASCENDC_EVICT_STRATEGY_DISPATCHER_H_
 #define ASCENDC_EVICT_STRATEGY_DISPATCHER_H_

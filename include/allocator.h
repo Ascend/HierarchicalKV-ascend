@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <stdlib.h>
 #include "debug.h"
 

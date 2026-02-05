@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include "allocator.h"
 #include "debug.h"

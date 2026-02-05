@@ -18,14 +18,17 @@
 #pragma once
 
 #include <stdarg.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <string>
 #include "cuda2npu.h"
 #if (!defined(__CCE__))
 #include <acl/acl.h>
+#include "aclrtlaunch_host_nano_kernel.h"
 #include "debug.h"
 #endif
 

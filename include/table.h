@@ -17,11 +17,17 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <vector>
 #include <acl/acl.h>
+#include "aclrtlaunch_allocate_bucket_others_kernel.h"
+#include "aclrtlaunch_allocate_bucket_vectors_kernel.h"
+#include "aclrtlaunch_create_atomic_keys_kernel.h"
+#include "aclrtlaunch_create_atomic_scores_kernel.h"
 #include "allocator.h"
 #include "debug.h"
 #include "utils.h"
