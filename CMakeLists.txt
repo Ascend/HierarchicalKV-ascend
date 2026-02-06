@@ -130,6 +130,7 @@ target_link_libraries(hkv_benchmark PRIVATE
 
 if(ENABLE_TEST STREQUAL 1)
   enable_testing()
+  add_subdirectory(3rdparty/gtest)
   add_subdirectory(tests)
 endif()
 

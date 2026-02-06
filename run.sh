@@ -118,7 +118,7 @@ if [ "${RUN_MODE}" = "sim" ]; then
 fi
 
 set -e
-rm -rf build out
+rm -rf build ${INSTALL_PREFIX}
 mkdir -p build
 cmake -B build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
@@ -127,8 +127,9 @@ cmake -B build \
     -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
     -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
     -DASCEND_CANN_PACKAGE_PATH=${_ASCEND_INSTALL_PATH} \
+    -DBUILD_SHARED_LIBS=ON \
     -DENABLE_TEST=${ENABLE_TEST}
-cmake --build build -j --verbose
+cmake --build build -j 16 --verbose
 cmake --install build
 
 if [ $COMPILE_ONLY -eq 1 ]; then
@@ -144,13 +145,9 @@ if [ $ENABLE_TEST -eq 1 ]; then
     popd
 fi
 
-rm -f hkv_demo hkv_benchmark
-cp ./out/bin/* ./
-
 (
-    ./hkv_benchmark > hkv_benchmark_run.log
-    ./hkv_demo > hkv_demo_run.log
-
+    ${INSTALL_PREFIX}/bin/hkv_benchmark > hkv_benchmark_run.log
+    ${INSTALL_PREFIX}/bin/hkv_demo > hkv_demo_run.log
 )
 # tidy folder by delete log files
 if [ "${RUN_MODE}" = "sim" ]; then

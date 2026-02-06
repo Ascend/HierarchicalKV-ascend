@@ -4,12 +4,10 @@ project(HKV_UT)
 
 # 设置module搜索路径
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/../cmake)
-set(GTEST_HOME ${CMAKE_CURRENT_LIST_DIR}/../3rdparty/googletest CACHE STRING "path to googletest installed")
-find_package(GTest REQUIRED)
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -ggdb -Wl,-rpath=${GTEST_HOME}/lib:${CMAKE_CURRENT_LIST_DIR}/../build/lib")
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -ggdb")
 
 # 所有用例都依赖gtest
-link_libraries(gtest_module)
+link_libraries(gtest gmock gtest_main)
 if ("${RUN_MODE}" STREQUAL "sim")
   add_definitions(-DSIM_MODE=1)
 endif()
@@ -66,6 +64,14 @@ if("${RUN_MODE}" STREQUAL "npu" OR "${RUN_MODE}" STREQUAL "sim")
   )
 
   ascendc_library(test_score_functor_kernels_${RUN_MODE} STATIC ${TEST_KERNEL_FILES})
+  # 由于ascendc_library编译一定会将算子头文件安装出去，那么这里只能在安装完成后删掉冗余的测试算子头文件
+  install(CODE "
+    set(DELETE_DIR \${CMAKE_INSTALL_PREFIX}/include/test_score_functor_kernels_\${RUN_MODE})
+    if(EXISTS \${DELETE_DIR} AND IS_DIRECTORY \${DELETE_DIR})
+      message(STATUS \"Removing unnecessary directory: \${DELETE_DIR}\")
+      file(REMOVE_RECURSE \${DELETE_DIR})
+    endif()
+  ")
 endif()
 
 # 编译测试可执行文件
