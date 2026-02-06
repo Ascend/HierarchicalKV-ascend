@@ -30,7 +30,9 @@ extern "C" __global__ __aicore__ void find_or_insert_ptr_kernel_v2(
     GM_ADDR buckets, GM_ADDR buckets_size, uint64_t buckets_num,
     uint32_t bucket_capacity, uint32_t dim, GM_ADDR keys, GM_ADDR value_ptrs,
     GM_ADDR scores, GM_ADDR key_ptrs, uint64_t n, GM_ADDR founds,
-    uint64_t global_epoch, int32_t evict_strategy, uint32_t value_size) {
+    uint64_t global_epoch, int32_t evict_strategy, uint32_t value_size,
+    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
+    uint64_t capacity_divisor_shift, uint64_t n_align_warp, uint64_t capacity) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
 
   const uint64_t thread_all = THREAD_NUM * GetBlockNum();
@@ -48,5 +50,6 @@ extern "C" __global__ __aicore__ void find_or_insert_ptr_kernel_v2(
               Simt::Dim3{static_cast<uint32_t>(THREAD_NUM)}, buckets,
               buckets_size, buckets_num, bucket_capacity, dim, keys, value_ptrs,
               scores, key_ptrs, n, founds, global_epoch, cur_score,
-              GetBlockIdx(), thread_all))));
+              GetBlockIdx(), thread_all, max_bucket_shift, capacity_divisor_magic,
+              capacity_divisor_shift, n_align_warp, capacity))));
 }

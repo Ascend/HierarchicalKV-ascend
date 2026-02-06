@@ -1403,10 +1403,14 @@ class HashTable : public HashTableBase<K, V, S> {
       check_evict_strategy(scores);
     }
 
+    uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     ACLRT_LAUNCH_KERNEL(find_or_insert_ptr_kernel_v2)
     (block_dim_, stream, table_->buckets, table_->buckets_size,
-     table_->buckets_num, options_.max_bucket_size, options_.dim, (void*)keys,
-     values, scores, locked_key_ptrs, n, founds, global_epoch_, evict_strategy, value_size_);
+     table_->buckets_num, options_.max_bucket_size, value_move_opt_.dim,
+     (void*)keys, values, scores, locked_key_ptrs, n, founds, global_epoch_,
+     evict_strategy, value_move_opt_.size, table_->max_bucket_shift,
+     table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+     n_align_warp, table_->capacity);
 
     NpuCheckError();
   }
