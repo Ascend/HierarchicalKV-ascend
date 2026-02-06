@@ -130,6 +130,8 @@ target_link_libraries(hkv_benchmark PRIVATE
 
 if(ENABLE_TEST STREQUAL 1)
   enable_testing()
+  set(INSTALL_GTEST OFF CACHE BOOL "Disable installation of GTest" FORCE)
+  set(INSTALL_GMOCK OFF CACHE BOOL "Disable installation of GMock" FORCE)
   add_subdirectory(3rdparty/gtest)
   add_subdirectory(tests)
 endif()

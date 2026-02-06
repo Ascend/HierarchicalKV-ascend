@@ -140,7 +140,7 @@ export LD_LIBRARY_PATH=${INSTALL_PREFIX}/lib:${INSTALL_PREFIX}/lib64:${_ASCEND_I
 
 echo "======================ctest======================"
 if [ $ENABLE_TEST -eq 1 ]; then
-    export LD_LIBRARY_PATH=$(pwd)/3rdparty/googletest/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=$(pwd)/build/lib:$LD_LIBRARY_PATH
     pushd build && ctest -V
     popd
 fi

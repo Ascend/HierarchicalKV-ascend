@@ -66,7 +66,7 @@ if("${RUN_MODE}" STREQUAL "npu" OR "${RUN_MODE}" STREQUAL "sim")
   ascendc_library(test_score_functor_kernels_${RUN_MODE} STATIC ${TEST_KERNEL_FILES})
   # 由于ascendc_library编译一定会将算子头文件安装出去，那么这里只能在安装完成后删掉冗余的测试算子头文件
   install(CODE "
-    set(DELETE_DIR \${CMAKE_INSTALL_PREFIX}/include/test_score_functor_kernels_\${RUN_MODE})
+    set(DELETE_DIR \${CMAKE_INSTALL_PREFIX}/include/test_score_functor_kernels_${RUN_MODE})
     if(EXISTS \${DELETE_DIR} AND IS_DIRECTORY \${DELETE_DIR})
       message(STATUS \"Removing unnecessary directory: \${DELETE_DIR}\")
       file(REMOVE_RECURSE \${DELETE_DIR})
