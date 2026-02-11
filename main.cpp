@@ -224,6 +224,7 @@ int32_t main(int32_t argc, char* argv[]) {
   const char* soc_version = SOC_VERSION;
   auto ascendc_platform =
       platform_ascendc::PlatformAscendCManager::GetInstance(soc_version);
+  HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed, please check SOC_VERSION!");
   block_dim = ascendc_platform->GetCoreNumAiv();
   core_num_aiv = block_dim;
   std::cout << "Soc version: " << soc_version

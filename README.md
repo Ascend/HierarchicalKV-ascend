@@ -192,8 +192,8 @@ cd HierarchicalKV-ascend
 ```bash
 bash run.sh -v [SOC_VERSION] -d [DEVICE_ID]
 ```
-- SOC_VERION：AI处理器的型号，默认值为`ascend950pr_9579`。在服务器执行npu-smi info -t board -i id -c chip_id命令进行查询，获取`Chip Name`和
-`NPU Name`信息，实际配置值为`{Chip Name}_{NPU Name}`，**英文字母全小写**。例如Chip Name取值为Ascend950PR，NPU Name取值为957c，实际配置值为ascend950pr_957c。其中：
+- SOC_VERION：AI处理器的型号，默认值为`Ascend950PR_9579`。在服务器执行npu-smi info -t board -i id -c chip_id命令进行查询，获取`Chip Name`和
+`NPU Name`信息，实际配置值为`{Chip Name}_{NPU Name}`。例如Chip Name取值为Ascend950PR，NPU Name取值为957c，实际配置值为Ascend950PR_957c。其中：
   - id：设备id，通过npu-smi info -l命令查出的NPU ID即为设备id。
   - chip_id：芯片id，通过npu-smi info -m命令查出的Chip ID即为芯片id。
 - DEVICE_ID：样例执行的npu的卡号，默认值为0。
@@ -201,5 +201,5 @@ bash run.sh -v [SOC_VERSION] -d [DEVICE_ID]
 
 示例：
 ```bash
-bash run.sh -v ascend950pr_9579 -d 3
+bash run.sh -v Ascend950PR_9579 -d 3
 ```

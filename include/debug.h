@@ -59,7 +59,7 @@ template <class Msg>
 inline void hkv_check_(bool cond, const Msg& msg, const char* file, int line) {
   if (!cond) {
     std::ostringstream os;
-    os << file << ':' << line << ": HierarchicalKV error " << msg;
+    os << file << ':' << line << ": HierarchicalKV error. " << msg;
     throw HkvException(os.str());
   }
 }

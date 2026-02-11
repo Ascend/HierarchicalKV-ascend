@@ -10,7 +10,7 @@ SHORT=h,r:,v:,i:,b:,p:,d:,c,t:
 LONG=help,run-mode:,soc-version:,install-path:,build-type:,install-prefix:,device:,compile-only,enable-test:
 OPTS=$(getopt -a --options $SHORT --longoptions $LONG -- "$@")
 eval set -- "$OPTS"
-SOC_VERSION="ascend950pr_9579"
+SOC_VERSION="Ascend950PR_9579"
 COMPILE_ONLY=0
 ENABLE_TEST=1
 RUN_MODE="npu"
