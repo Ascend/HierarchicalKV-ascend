@@ -93,10 +93,6 @@ void demo_hkv_hashtable() {
     V* d_def_val;
     V** d_vectors_ptr;
     bool* d_found;
-    K* d_keys_out;
-
-    K* d_evict_keys;
-    S* d_evict_scores;
 
     NPU_CHECK(aclrtMalloc((void**)&d_keys, key_num_per_op * sizeof(K),
                           ACL_MEM_MALLOC_HUGE_FIRST));
@@ -109,13 +105,6 @@ void demo_hkv_hashtable() {
     NPU_CHECK(aclrtMalloc((void**)&d_vectors_ptr, key_num_per_op * sizeof(V*),
                           ACL_MEM_MALLOC_HUGE_FIRST));
     NPU_CHECK(aclrtMalloc((void**)&d_found, key_num_per_op * sizeof(bool),
-                          ACL_MEM_MALLOC_HUGE_FIRST));
-    NPU_CHECK(aclrtMalloc((void**)&d_keys_out, key_num_per_op * sizeof(K),
-                          ACL_MEM_MALLOC_HUGE_FIRST));
-
-    NPU_CHECK(aclrtMalloc((void**)&d_evict_keys, key_num_per_op * sizeof(K),
-                          ACL_MEM_MALLOC_HUGE_FIRST));
-    NPU_CHECK(aclrtMalloc((void**)&d_evict_scores, key_num_per_op * sizeof(S),
                           ACL_MEM_MALLOC_HUGE_FIRST));
 
     NPU_CHECK(aclrtMemset(d_vectors, key_num_per_op * sizeof(V) * dim, 1,
@@ -193,9 +182,6 @@ void demo_hkv_hashtable() {
     NPU_CHECK(aclrtFree(d_found));
     NPU_CHECK(aclrtFree(d_def_val));
     NPU_CHECK(aclrtFree(d_vectors_ptr));
-
-    NPU_CHECK(aclrtFree(d_evict_keys));
-    NPU_CHECK(aclrtFree(d_evict_scores));
 
     NPU_CHECK(aclrtSynchronizeDevice());
     NpuCheckError();
