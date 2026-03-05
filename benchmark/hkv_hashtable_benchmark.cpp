@@ -82,17 +82,11 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
                    const float hitrate = 0.6f) {
   K* h_keys;
   S* h_scores;
-  V* h_vectors;
   bool* h_found;
 
   NPU_CHECK(aclrtMallocHost((void**)&h_keys, key_num_per_op * sizeof(K)));
   NPU_CHECK(aclrtMallocHost((void**)&h_scores, key_num_per_op * sizeof(S)));
-  NPU_CHECK(
-      aclrtMallocHost((void**)&h_vectors, key_num_per_op * sizeof(V) * dim));
   NPU_CHECK(aclrtMallocHost((void**)&h_found, key_num_per_op * sizeof(bool)));
-
-  NPU_CHECK(aclrtMemset(h_vectors, key_num_per_op * sizeof(V) * dim, 0,
-                        key_num_per_op * sizeof(V) * dim));
 
   bool need_scores = (Table::evict_strategy == EvictStrategy::kLfu ||
                       Table::evict_strategy == EvictStrategy::kEpochLfu ||
@@ -105,7 +99,6 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
   V* d_def_val;
   V** d_vectors_ptr;
   bool* d_found;
-  K* d_keys_out;
 
   K* d_evict_keys;
   S* d_evict_scores;
@@ -121,8 +114,6 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
   NPU_CHECK(aclrtMalloc((void**)&d_vectors_ptr, key_num_per_op * sizeof(V*),
                         ACL_MEM_MALLOC_HUGE_FIRST));
   NPU_CHECK(aclrtMalloc((void**)&d_found, key_num_per_op * sizeof(bool),
-                        ACL_MEM_MALLOC_HUGE_FIRST));
-  NPU_CHECK(aclrtMalloc((void**)&d_keys_out, key_num_per_op * sizeof(K),
                         ACL_MEM_MALLOC_HUGE_FIRST));
 
   NPU_CHECK(aclrtMalloc((void**)&d_evict_keys, key_num_per_op * sizeof(K),
