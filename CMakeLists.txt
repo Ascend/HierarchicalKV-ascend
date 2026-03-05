@@ -60,7 +60,7 @@ set_target_properties(kernel_lib PROPERTIES
 )
 
 target_compile_options(kernel_lib PRIVATE
-  $<$<COMPILE_LANGUAGE:ASC>: --npu-arch=dav-3101>
+  $<$<COMPILE_LANGUAGE:ASC>: --npu-arch=dav-3510>
   -DUSE_DUMP_KERNEL_ASC
 )
 
