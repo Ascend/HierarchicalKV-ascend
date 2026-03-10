@@ -18,13 +18,7 @@
 #include <vector>
 #include <functional>
 #include "acl/acl.h"
-
-#include "aclrtlaunch_test_desired_when_missed_kernel.h"
-#include "aclrtlaunch_test_update_kernel.h"
-#include "aclrtlaunch_test_update_with_digest_kernel.h"
-#include "aclrtlaunch_test_update_without_missed_bucket_kernel.h"
-#include "aclrtlaunch_test_update_without_missed_ptr_kernel.h"
-
+#include "test_score_functor_kernel.h"
 #include "../test_util.h"
 #include "../../include/types.h"
 
@@ -92,8 +86,8 @@ class ScoreFunctorTest : public ::testing::Test {
     // 3. 初始化 Bucket 的指针成员
     Bucket<K, V, S> h_bucket;
     h_bucket.digests_ = reinterpret_cast<D*>(d_mem);
-    h_bucket.keys_ = reinterpret_cast<K*>(h_bucket.digests_ + reserve);
-    h_bucket.scores_ = reinterpret_cast<S*>(h_bucket.keys_ + CAP);
+    h_bucket.keys_ = reinterpret_cast<__gm__ K*>(reinterpret_cast<__gm__ void*>(h_bucket.digests_ + reserve));
+    h_bucket.scores_ = reinterpret_cast<__gm__ S*>(reinterpret_cast<__gm__ void*>(h_bucket.keys_ + CAP));
     h_bucket.vectors = nullptr;
 
     // 4. 拷贝到设备
@@ -168,16 +162,14 @@ class ScoreFunctorTest : public ::testing::Test {
 TEST_F(ScoreFunctorTest, desired_lru) {
   S cycle = 9876543210UL;
   S result = run_single([&](void* out) {
-    ACLRT_LAUNCH_KERNEL(test_desired_when_missed_kernel)(
-        1, stream_, EvictStrategyInternal::kLru, 0, 0, 0, cycle, out);
+    test_desired_when_missed_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLru, 0, 0, 0, cycle, out);
   });
   EXPECT_EQ(result, cycle);
 }
 
 TEST_F(ScoreFunctorTest, desired_lfu) {
     S result = run_single([&](void* out) {
-      ACLRT_LAUNCH_KERNEL(test_desired_when_missed_kernel)(
-          1, stream_, EvictStrategyInternal::kLfu, 0, 0, 0, 0, out);
+      test_desired_when_missed_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, 0, 0, 0, 0, out);
     });
     EXPECT_EQ(result, MAX_SCORE);
   }
@@ -186,8 +178,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S epoch = 5;
     S cycle = 0x100000000UL;
     S result = run_single([&](void* out) {
-      ACLRT_LAUNCH_KERNEL(test_desired_when_missed_kernel)(
-          1, stream_, EvictStrategyInternal::kEpochLru, 0, 0, epoch, cycle, out);
+      test_desired_when_missed_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLru, 0, 0, epoch, cycle, out);
     });
     EXPECT_EQ(result, (epoch << 32) | ((cycle >> 20) & 0xFFFFFFFFUL));
   }
@@ -197,8 +188,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     in.copy_from(vector<S>{100});
     S epoch = 7;
     S result = run_single([&](void* out) {
-      ACLRT_LAUNCH_KERNEL(test_desired_when_missed_kernel)(
-          1, stream_, EvictStrategyInternal::kEpochLfu, in.get(), 0, epoch, 0, out);
+      test_desired_when_missed_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, in.get(), 0, epoch, 0, out);
     });
     EXPECT_EQ(result, (epoch << 32) | 100);
   }
@@ -207,8 +197,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     DeviceMem in(sizeof(S));
     in.copy_from(vector<S>{12345});
     S result = run_single([&](void* out) {
-      ACLRT_LAUNCH_KERNEL(test_desired_when_missed_kernel)(
-          1, stream_, EvictStrategyInternal::kCustomized, in.get(), 0, 0, 0, out);
+      test_desired_when_missed_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kCustomized, in.get(), 0, 0, 0, out);
     });
     EXPECT_EQ(result, 12345);
   }
@@ -218,8 +207,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     S desired = 123456;
     
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kLru, bucket, 0, 0, 0, desired, false);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLru, bucket, 0, 0, 0, desired, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -232,14 +220,12 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     
     // 新插入
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, 111, true);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, 111, true);
     aclrtSynchronizeStream(stream_);
     EXPECT_EQ(read_scores(bucket)[0], 999);
     
     // 累加
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, MAX_SCORE - 1, false);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, MAX_SCORE - 1, false);
     aclrtSynchronizeStream(stream_);
     EXPECT_EQ(read_scores(bucket)[0], 999 + 999);
     free_bucket(bucket);
@@ -249,8 +235,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     S desired = (5UL << 32) | 123;
     
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLru, bucket, 0, 0, 0, desired, false);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLru, bucket, 0, 0, 0, desired, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -261,14 +246,12 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     S desired = (7UL << 32) | 200;
     
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLfu, bucket, 0, 0, 0, desired, true);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, bucket, 0, 0, 0, desired, true);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
   
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLfu, bucket, 0, 0, 0, desired, false);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, bucket, 0, 0, 0, desired, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], (7UL << 32) | 400);
@@ -279,8 +262,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     S desired = 88888;
     
-    ACLRT_LAUNCH_KERNEL(test_update_kernel)(
-        1, stream_, EvictStrategyInternal::kCustomized, bucket, 0, 0, 0, desired, false);
+    test_update_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kCustomized, bucket, 0, 0, 0, desired, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -294,8 +276,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S desired = 123;
     D digest = 0x55;
     
-    ACLRT_LAUNCH_KERNEL(test_update_with_digest_kernel)(
-        1, stream_, EvictStrategyInternal::kLru, keys, 0, 0, 0, desired, CAP, digest, false);
+    test_update_with_digest_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLru, keys, 0, 0, 0, desired, CAP, digest, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -310,8 +291,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto keys = get_keys_from_bucket(bucket);
     D digest = 0xAA;
     
-    ACLRT_LAUNCH_KERNEL(test_update_with_digest_kernel)(
-        1, stream_, EvictStrategyInternal::kLfu, keys, 0, in.get(), 0, 0, CAP, digest, true);
+    test_update_with_digest_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, keys, 0, in.get(), 0, 0, CAP, digest, true);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], 333);
@@ -325,8 +305,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S desired = (3UL << 32) | 456;
     D digest = 0xBB;
     
-    ACLRT_LAUNCH_KERNEL(test_update_with_digest_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLru, keys, 0, 0, 0, desired, CAP, digest, false);
+    test_update_with_digest_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLru, keys, 0, 0, 0, desired, CAP, digest, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -340,8 +319,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S desired = (9UL << 32) | 777;
     D digest = 0xCC;
     
-    ACLRT_LAUNCH_KERNEL(test_update_with_digest_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLfu, keys, 0, 0, 0, desired, CAP, digest, false);
+    test_update_with_digest_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, keys, 0, 0, 0, desired, CAP, digest, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -355,8 +333,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S desired = 99999;
     D digest = 0xDD;
     
-    ACLRT_LAUNCH_KERNEL(test_update_with_digest_kernel)(
-        1, stream_, EvictStrategyInternal::kCustomized, keys, 0, 0, 0, desired, CAP, digest, false);
+    test_update_with_digest_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kCustomized, keys, 0, 0, 0, desired, CAP, digest, false);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], desired);
@@ -369,8 +346,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     S cycle = 555555;
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_bucket_kernel)(
-        1, stream_, EvictStrategyInternal::kLru, bucket, 0, 0, 0, 0, cycle);
+    test_update_without_missed_bucket_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLru, bucket, 0, 0, 0, 0, cycle);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], cycle);
@@ -383,8 +359,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     DeviceMem in(sizeof(S));
     in.copy_from(vector<S>{20});
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_bucket_kernel)(
-        1, stream_, EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, 0, 0);
+    test_update_without_missed_bucket_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, bucket, 0, in.get(), 0, 0, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], 10 + 20);
@@ -396,8 +371,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S epoch = 11;
     S cycle = 0x200000000UL;
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_bucket_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLru, bucket, 0, 0, 0, epoch, cycle);
+    test_update_without_missed_bucket_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLru, bucket, 0, 0, 0, epoch, cycle);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], (epoch << 32) | ((cycle >> 20) & 0xFFFFFFFFUL));
@@ -411,8 +385,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     DeviceMem in(sizeof(S));
     in.copy_from(vector<S>{20});
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_bucket_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLfu, bucket, 0, in.get(), 0, epoch, 0);
+    test_update_without_missed_bucket_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, bucket, 0, in.get(), 0, epoch, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0] & 0xFFFFFFFFUL, 70);
@@ -424,8 +397,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     in.copy_from(vector<S>{77777});
     auto bucket = alloc_bucket();
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_bucket_kernel)(
-        1, stream_, EvictStrategyInternal::kCustomized, bucket, 0, in.get(), 0, 0, 0);
+    test_update_without_missed_bucket_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kCustomized, bucket, 0, in.get(), 0, 0, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], 77777);
@@ -438,8 +410,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto keys = get_keys_from_bucket(bucket);
     S cycle = 666666;
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_ptr_kernel)(
-        1, stream_, EvictStrategyInternal::kLru, keys, CAP, 0, 0, 0, 0, cycle);
+    test_update_without_missed_ptr_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLru, keys, CAP, 0, 0, 0, 0, cycle);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], cycle);
@@ -453,8 +424,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     DeviceMem in(sizeof(S));
     in.copy_from(vector<S>{20});
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_ptr_kernel)(
-        1, stream_, EvictStrategyInternal::kLfu, keys, CAP, 0, in.get(), 0, 0, 0);
+    test_update_without_missed_ptr_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kLfu, keys, CAP, 0, in.get(), 0, 0, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], 20 + 20);
@@ -467,8 +437,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     S epoch = 15;
     S cycle = 0x300000000UL;
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_ptr_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLru, keys, CAP, 0, 0, 0, epoch, cycle);
+    test_update_without_missed_ptr_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLru, keys, CAP, 0, 0, 0, epoch, cycle);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], (epoch << 32) | ((cycle >> 20) & 0xFFFFFFFFUL));
@@ -483,8 +452,7 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     DeviceMem in(sizeof(S));
     in.copy_from(vector<S>{20});
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_ptr_kernel)(
-        1, stream_, EvictStrategyInternal::kEpochLfu, keys, CAP, 0, in.get(), 0, epoch, 0);
+    test_update_without_missed_ptr_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kEpochLfu, keys, CAP, 0, in.get(), 0, epoch, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0] & 0xFFFFFFFFUL, 80);
@@ -497,10 +465,10 @@ TEST_F(ScoreFunctorTest, desired_lfu) {
     auto bucket = alloc_bucket();
     auto keys = get_keys_from_bucket(bucket);
     
-    ACLRT_LAUNCH_KERNEL(test_update_without_missed_ptr_kernel)(
-        1, stream_, EvictStrategyInternal::kCustomized, keys, CAP, 0, in.get(), 0, 0, 0);
+    test_update_without_missed_ptr_kernel<<<1, 0, stream_>>>(EvictStrategyInternal::kCustomized, keys, CAP, 0, in.get(), 0, 0, 0);
     aclrtSynchronizeStream(stream_);
     
     EXPECT_EQ(read_scores(bucket)[0], 88888);
     free_bucket(bucket);
   }
+  

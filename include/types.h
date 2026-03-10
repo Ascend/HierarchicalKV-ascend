@@ -30,14 +30,13 @@ namespace hkv {
 /**
  * Shorthand for a Key-Value-score tuple.
  */
-template <class K, class V, class S>
+template <class K, class S>
 struct KVM {
   K key;
   uint64_t value;
   S score;
 };
 
-#if (!defined(__CCE__))
 struct uint4 {
   uint32_t x, y, z, w;
 };
@@ -45,7 +44,6 @@ struct uint4 {
 struct uint2 {
   uint32_t x, y;
 };
-#endif
 
 // Storage size.
 using byte16 = uint4;
@@ -150,7 +148,6 @@ bool IS_VACANT_KEY(K key) {
   return (VACANT_KEY_MASK_1 & key) == VACANT_KEY_MASK_2;
 }
 
-#if !defined(__CCE__)
 __attribute__((unused)) static aclError init_reserved_keys(int index) {
   if (index < 1 || index > MAX_RESERVED_KEY_BIT) {
     // index = 0 is the default,
@@ -159,7 +156,6 @@ __attribute__((unused)) static aclError init_reserved_keys(int index) {
   }
   return ACL_SUCCESS;
 }
-#endif
 
 template <class K, class V, class S>
 struct Bucket {

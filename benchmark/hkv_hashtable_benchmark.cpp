@@ -45,6 +45,9 @@ using std::setw;
 using namespace npu::hkv;
 using namespace benchmark;
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
 enum class Test_Mode {
   pure_hbm = 0,
   hybrid = 1,
@@ -760,7 +763,7 @@ void query_memory() {
 }
 
 int32_t main(int32_t argc, char* argv[]) {
-  const char* socVersion = SOC_VERSION;
+  const char* socVersion = TOSTRING(SOC_VERSION);
   auto ascendc_platform =
       platform_ascendc::PlatformAscendCManager::GetInstance(socVersion);
   HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed, please check SOC_VERSION!");

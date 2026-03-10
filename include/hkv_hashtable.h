@@ -31,30 +31,21 @@
 #include <shared_mutex>
 #include <string>
 #include <type_traits>
-#include "aclrtlaunch_allocate_bucket_others_kernel.h"
-#include "aclrtlaunch_allocate_bucket_vectors_kernel.h"
-#include "aclrtlaunch_clear_kernel.h"
-#include "aclrtlaunch_create_atomic_keys_kernel.h"
-#include "aclrtlaunch_create_atomic_scores_kernel.h"
-#include "aclrtlaunch_find_and_update_kernel.h"
-#include "aclrtlaunch_find_and_update_kernel_with_filter.h"
-#include "aclrtlaunch_find_or_insert_ptr_kernel.h"
-#include "aclrtlaunch_find_or_insert_ptr_kernel_v2.h"
-#include "aclrtlaunch_find_ptr_kernel.h"
-#include "aclrtlaunch_find_ptr_with_digest_kernel.h"
-#include "aclrtlaunch_get_bucket_others_address_kernel.h"
-#include "aclrtlaunch_host_nano_kernel.h"
-#include "aclrtlaunch_insert_or_assign_kernel.h"
-#include "aclrtlaunch_insert_or_assign_kernel_with_thread_1024.h"
-#ifndef USE_DUMP_KERNEL_ASC
-#include "aclrtlaunch_dump_kernel.h"
-#endif
+#include "../hkv_hashtable/dump_kernel/dump_kernel.h"
+#include "../hkv_hashtable/rehash_kernel/rehash_kernel.h"
+#include "../hkv_hashtable/clear_kernel/clear_kernel.h"
+#include "../hkv_hashtable/find_and_update_kernel/find_and_update_kernel_with_filter.h"
+#include "../hkv_hashtable/find_and_update_kernel/find_and_update_kernel.h"
+#include "../hkv_hashtable/find_ptr_kernel/find_ptr_with_digest_kernel.h"
+#include "../hkv_hashtable/find_ptr_kernel/find_ptr_kernel.h"
+#include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel_with_filter.h"
+#include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel.h"
+#include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
+#include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel.h"
+#include "../hkv_hashtable/insert_or_assign_kernel/insert_or_assign_kernel.h"
+#include "../hkv_hashtable/insert_and_evict_kernel/insert_and_evict_kernel.h"
 #include "aclnn_helper.h"
 #include "aclnnop/aclnn_reduce_sum.h"
-#include "aclrtlaunch_assign_scores_kernel.h"
-#include "aclrtlaunch_assign_scores_kernel_with_filter.h"
-#include "aclrtlaunch_rehash_kernel.h"
-#include "aclrtlaunch_insert_and_evict_kernel.h"
 #include "bucket_memory_pool_manager.h"
 #include "hashtable_options.h"
 #include "memory_pool.h"
@@ -1093,21 +1084,21 @@ class HashTable : public HashTableBase<K, V, S> {
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     if (value_move_opt_.is_large_size) {
-      ACLRT_LAUNCH_KERNEL(insert_or_assign_kernel_with_thread_1024)(
-          block_dim_, stream, table_->buckets, table_->buckets_size,
-          table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-          const_cast<key_type*>(keys), const_cast<value_type*>(values),
-          const_cast<score_type*>(scores), n, global_epoch_, evict_strategy_,
-          value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+      insert_or_assign_kernel_with_thread_1024<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
+        static_cast<void*>(table_->buckets), table_->buckets_size,
+        table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+        const_cast<key_type*>(keys), const_cast<value_type*>(values),
+        const_cast<score_type*>(scores), n, global_epoch_, value_move_opt_.size,
+        table_->max_bucket_shift, table_->capacity_divisor_magic,
+        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
     } else {
-      ACLRT_LAUNCH_KERNEL(insert_or_assign_kernel)(
-          block_dim_, stream, table_->buckets, table_->buckets_size,
-          table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-          const_cast<key_type*>(keys), const_cast<value_type*>(values),
-          const_cast<score_type*>(scores), n, global_epoch_, evict_strategy_,
-          value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+      insert_or_assign_kernel<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
+        static_cast<void*>(table_->buckets), table_->buckets_size,
+        table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+        const_cast<key_type*>(keys), const_cast<value_type*>(values),
+        const_cast<score_type*>(scores), n, global_epoch_, value_move_opt_.size,
+        table_->max_bucket_shift, table_->capacity_divisor_magic,
+        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
     }
 
     NpuCheckError();
@@ -1189,14 +1180,13 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-
-    ACLRT_LAUNCH_KERNEL(insert_and_evict_kernel)(
-      block_dim_, stream, table_->buckets, table_->buckets_size,
+    insert_and_evict_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+      table_->buckets, table_->buckets_size,
       table_->capacity, options_.max_bucket_size, value_move_opt_.dim,
-      const_cast<key_type*>(keys), const_cast<value_type*>(values),
-      const_cast<score_type*>(scores), evicted_keys, evicted_values,
-      evicted_scores, d_evicted_counter, n, global_epoch_, evict_strategy,
-      value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
+      const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
+      const_cast<score_type*>(scores), evicted_keys, static_cast<void*>(evicted_values),
+      evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
+      table_->max_bucket_shift, table_->capacity_divisor_magic,
       table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
 
     NpuCheckError();
@@ -1404,13 +1394,13 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-    ACLRT_LAUNCH_KERNEL(find_or_insert_ptr_kernel_v2)
-    (block_dim_, stream, table_->buckets, table_->buckets_size,
-     table_->buckets_num, options_.max_bucket_size, value_move_opt_.dim,
-     (void*)keys, values, scores, locked_key_ptrs, n, founds, global_epoch_,
-     evict_strategy, value_move_opt_.size, table_->max_bucket_shift,
-     table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-     n_align_warp, table_->capacity);
+    find_or_insert_ptr_kernel_v2<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(table_->buckets,
+      table_->buckets_size,
+      table_->buckets_num, options_.max_bucket_size, value_move_opt_.dim,
+      keys, static_cast<void*>(values), scores, locked_key_ptrs, n, founds, global_epoch_,
+      value_move_opt_.size, table_->max_bucket_shift,
+      table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+      n_align_warp, table_->capacity);
 
     NpuCheckError();
   }
@@ -1541,15 +1531,16 @@ class HashTable : public HashTableBase<K, V, S> {
 
     constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
     if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
-      ACLRT_LAUNCH_KERNEL(assign_scores_kernel_with_filter)
-      (block_dim_, stream, table_->buckets, table_->capacity, options_.max_bucket_size,
-      options_.dim, (void*)keys, (void*)scores, n, global_epoch_, evict_strategy, value_size_,
-      table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      assign_scores_kernel_with_filter<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+        static_cast<void*>(table_->buckets), table_->capacity, options_.max_bucket_size,
+        options_.dim, static_cast<void*>(const_cast<key_type*>(keys)),
+        static_cast<void*>(const_cast<score_type*>(scores)), n, global_epoch_,
+        table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     } else {
       throw std::runtime_error(
         "Not support update score when keys are not unique or bucket "
         "capacity is smaller than " + std::to_string(MinBucketCapacityFilter) + ".");
-  }
+    }
     NpuCheckError();
   }
 
@@ -1689,9 +1680,9 @@ class HashTable : public HashTableBase<K, V, S> {
     if (n == 0) {
       return;
     }
-    ACLRT_LAUNCH_KERNEL(find_ptr_with_digest_kernel)(
-      block_dim_, stream, table_->buckets, table_->capacity, table_->buckets_num, options_.max_bucket_size,
-      options_.dim, const_cast<key_type*>(keys), values, scores, founds, n, global_epoch_, value_size_,
+    find_ptr_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
+      table_->buckets, table_->capacity, table_->buckets_num, options_.max_bucket_size,
+      options_.dim, const_cast<key_type*>(keys), values, scores, founds, n, global_epoch_,
       table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     NpuCheckError();
   }
@@ -1736,10 +1727,9 @@ class HashTable : public HashTableBase<K, V, S> {
     check_evict_strategy(scores);
     constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
     if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
-      ACLRT_LAUNCH_KERNEL(find_and_update_kernel_with_filter)
-      (block_dim_, stream, table_->buckets, table_->capacity, options_.max_bucket_size,
-        options_.dim, (void*)keys, values, scores, founds, n, true, global_epoch_, evict_strategy, value_size_,
-        table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      find_and_update_kernel_with_filter<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(table_->buckets,
+        table_->capacity, options_.max_bucket_size, options_.dim, const_cast<key_type*>(keys), values, scores, founds, n, true,
+        global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     } else {
       throw std::runtime_error(
           "Not support update score when keys are not unique or bucket "
@@ -1850,10 +1840,8 @@ class HashTable : public HashTableBase<K, V, S> {
    * object.
    */
   void clear(aclrtStream stream = 0) {
-    ACLRT_LAUNCH_KERNEL(clear_kernel)(
-        block_dim_, stream, table_->buckets, table_->buckets_size,
-        options_.max_bucket_size, table_->capacity, value_size_);
-
+    clear_kernel<K, V, S><<<block_dim_, 0, stream>>>(static_cast<void*>(table_->buckets),
+      static_cast<void*>(table_->buckets_size), options_.max_bucket_size, table_->capacity);
     NpuCheckError();
   }
 
@@ -1892,18 +1880,10 @@ class HashTable : public HashTableBase<K, V, S> {
       return;
     }
     n = std::min(table_->capacity - offset, n);
-#ifdef USE_DUMP_KERNEL_ASC
-    extern void dump_kernel_do(uint32_t , void*, void*, void*, void*, void*, void*,
-      const size_t ,const size_t ,void*, uint32_t, int32_t, uint32_t);
-    dump_kernel_do(block_dim_, stream, d_table_, table_->buckets, keys, values,
-                   scores, offset, n, d_counter, value_move_opt_.size,
-                   value_move_opt_.cg_size, value_move_opt_.dim);
-#else
-    ACLRT_LAUNCH_KERNEL(dump_kernel)(
-        block_dim_, stream, d_table_, table_->buckets, keys, values, scores,
-        offset, n, d_counter, value_move_opt_.size, value_move_opt_.cg_size,
-        value_move_opt_.dim);
-#endif
+    dump_kernel<K, V, S><<<block_dim_, 64 * 1024, stream>>>(
+      static_cast<void*>(d_table_), static_cast<void*>(table_->buckets), static_cast<void*>(keys),
+      static_cast<void*>(values), static_cast<void*>(scores),
+      offset, n, static_cast<void*>(d_counter), value_move_opt_.size, value_move_opt_.cg_size, value_move_opt_.dim);
     NpuCheckError();
   }
 
@@ -2151,8 +2131,7 @@ class HashTable : public HashTableBase<K, V, S> {
               : nullptr);
       sync_table_configuration();
 
-      ACLRT_LAUNCH_KERNEL(rehash_kernel)(block_dim_, stream, d_table_,
-                                         table_->buckets_num / 2, value_size_);
+      rehash_kernel<K, V, S><<<block_dim_, 0, stream>>>(d_table_, table_->buckets_num / 2);
       NPU_CHECK(aclrtSynchronizeDevice());
     }
 
@@ -2268,20 +2247,10 @@ class HashTable : public HashTableBase<K, V, S> {
       const size_type batch_size = std::min(total_size - i, n);
 
       // Launch dump_kernel to export data to device memory
-#ifdef USE_DUMP_KERNEL_ASC
-      extern void dump_kernel_do(uint32_t, void*, void*, void*, void*, void*,
-                                 void*, const size_t, const size_t, void*,
-                                 uint32_t, int32_t, uint32_t);
-      dump_kernel_do(block_dim_, stream, d_table_, table_->buckets, d_keys,
-                     d_values, d_scores, i, batch_size, d_count,
-                     value_move_opt_.size, value_move_opt_.cg_size,
-                     value_move_opt_.dim);
-#else
-      ACLRT_LAUNCH_KERNEL(dump_kernel)
-      (block_dim_, stream, d_table_, table_->buckets, d_keys, d_values,
-       d_scores, i, batch_size, d_count, value_move_opt_.size,
-       value_move_opt_.cg_size, value_move_opt_.dim);
-#endif
+      dump_kernel<K, V, S><<<block_dim_, 64 * 1024, stream>>>(
+        static_cast<void*>(d_table_), static_cast<void*>(table_->buckets), static_cast<void*>(d_keys),
+        static_cast<void*>(d_values), static_cast<void*>(d_scores), i, batch_size,
+        static_cast<void*>(d_count), value_move_opt_.size, value_move_opt_.cg_size, value_move_opt_.dim);
       NpuCheckError();
       // Copy counter from device to host
       size_type count;

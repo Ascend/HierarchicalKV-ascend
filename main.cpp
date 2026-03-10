@@ -42,6 +42,9 @@ using V = float;
 using EvictStrategy = npu::hkv::EvictStrategy;
 using TableOptions = npu::hkv::HashTableOptions;
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
 static uint32_t core_num_aiv = 0;
 
 void demo_hkv_hashtable() {
@@ -207,7 +210,7 @@ void query_memory() {
 
 int32_t main(int32_t argc, char* argv[]) {
   uint32_t block_dim = 8;
-  const char* soc_version = SOC_VERSION;
+  const char* soc_version = TOSTRING(SOC_VERSION);
   auto ascendc_platform =
       platform_ascendc::PlatformAscendCManager::GetInstance(soc_version);
   HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed, please check SOC_VERSION!");

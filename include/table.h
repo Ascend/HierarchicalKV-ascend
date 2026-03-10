@@ -24,10 +24,7 @@
 #include <cstring>
 #include <vector>
 #include <acl/acl.h>
-#include "aclrtlaunch_allocate_bucket_others_kernel.h"
-#include "aclrtlaunch_allocate_bucket_vectors_kernel.h"
-#include "aclrtlaunch_create_atomic_keys_kernel.h"
-#include "aclrtlaunch_create_atomic_scores_kernel.h"
+#include "../hkv_hashtable/init_table_kernel/init_table_kernel.h"
 #include "allocator.h"
 #include "debug.h"
 #include "utils.h"
@@ -58,7 +55,7 @@ void realloc(P* ptr, size_t old_size, size_t new_size,
              BaseAllocator* allocator) {
   old_size = std::min(old_size, new_size);
 
-  char* new_ptr = nullptr;
+  __gm__ char* new_ptr = nullptr;
   allocator->alloc(MemoryType::Device, reinterpret_cast<void**>(&new_ptr),
                    new_size);
   if (*ptr != nullptr) {
@@ -144,6 +141,8 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
    */
   HKV_CHECK(start < end,
                "initialize_buckets, start should be less than end!");
+  aclrtStream default_stream;
+  aclrtCreateStream(&default_stream);
   size_t buckets_num = end - start;
   const size_t total_size_of_vectors =
       buckets_num * (*table)->bucket_max_size * sizeof(V) * (*table)->dim;
@@ -186,18 +185,19 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
     for (size_t j = 0; j < num_of_buckets_in_one_slice; j++) {
       if ((*table)->is_pure_hbm || mixed_hbm) {
         size_t index = start + num_of_allocated_buckets + j;
-        V* address =
-            (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
-        ACLRT_LAUNCH_KERNEL(allocate_bucket_vectors_kernel)(1, 0, (*table)->buckets, index, address, value_size);
+        __gm__ V* address =
+          (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
+        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets, index, address);
       } else {
         V* h_ptr =
             (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
-        V* address = nullptr;
+        __gm__ V* address = nullptr;
         NPU_CHECK(aclrtHostRegister(h_ptr, slice_real_size, ACL_HOST_REGISTER_MAPPED, (void**)&address));
         size_t index = start + num_of_allocated_buckets + j;
-        ACLRT_LAUNCH_KERNEL(allocate_bucket_vectors_kernel)(1, 0, (*table)->buckets, index, address, value_size);
+        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets, index, address);
       }
     }
+    aclrtSynchronizeStream(default_stream);
     NPU_CHECK(aclrtSynchronizeDevice());
     num_of_allocated_buckets += num_of_buckets_in_one_slice;
   }
@@ -239,24 +239,27 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
                        actual_bucket_memory_size * num_of_buckets);
     }
 
-    ACLRT_LAUNCH_KERNEL(allocate_bucket_others_kernel)(1, 0, (*table)->buckets, actual_bucket_memory_size, num_of_buckets, i,
-                        address, reserve_size, bucket_max_size, value_size);
+    allocate_bucket_others_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets,
+      actual_bucket_memory_size, num_of_buckets, i, address, reserve_size, bucket_max_size);
   }
+  aclrtSynchronizeStream(default_stream);
   NPU_CHECK(aclrtSynchronizeDevice());
 
   {
     const size_t block_size = 512;
     const size_t N = end - start + 1;
     const int grid_size = SAFE_GET_GRID_SIZE(N, block_size);
-    ACLRT_LAUNCH_KERNEL(create_atomic_keys_kernel)
-        (grid_size, 0, (*table)->buckets, start, end, (*table)->bucket_max_size, value_size);
+    create_atomic_keys_kernel<K, V, S><<<grid_size, 0, default_stream>>>((*table)->buckets,
+      start, end, (*table)->bucket_max_size);
   }
 
   {
-    ACLRT_LAUNCH_KERNEL(create_atomic_scores_kernel)
-    (block_dim, 0, (*table)->buckets, start, end, (*table)->bucket_max_size, value_size);
+    create_atomic_scores_kernel<K, V, S><<<block_dim, 0, default_stream>>>((*table)->buckets,
+      start, end, (*table)->bucket_max_size);
   }
+  aclrtSynchronizeStream(default_stream);
   NPU_CHECK(aclrtSynchronizeDevice());
+  aclrtDestroyStream(default_stream);
   NpuCheckError();
 }
 
@@ -304,7 +307,7 @@ void create_table(Table<K, V, S>** table, BaseAllocator* allocator,
                   const size_t tile_size = 32, const bool primary = true,
                   IBucketAddressProvider* provider = nullptr) {
   allocator->alloc(MemoryType::Host, (void**)table, sizeof(Table<K, V, S>));
-  (void)std::memset((void*)*table, 0, sizeof(Table<K, V, S>));
+  (void)std::memset(reinterpret_cast<void*>(*table), 0, sizeof(Table<K, V, S>));
   (*table)->dim = dim;
   (*table)->bucket_max_size = bucket_max_size;
   (*table)->max_size = std::max(init_size, max_size);

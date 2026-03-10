@@ -14,13 +14,15 @@
  * limitations under the License.
  */
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <memory>
-#include <vector>
-#define TEST_MEM
-#include "aclnn_helper.h"
-#include "test_util.h"
+ #include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+ #include <memory>
+ #include <vector>
+ #define TEST_MEM
+ #include "acl/acl.h"
+ #include "hkv_hashtable.h"
+ #include "aclnn_helper.h"
+ #include "test_util.h"
 
 using namespace std;
 using namespace npu::hkv;

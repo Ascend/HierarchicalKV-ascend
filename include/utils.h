@@ -26,22 +26,22 @@
 #include <limits>
 #include <string>
 #include "cuda2npu.h"
-#if (!defined(__CCE__))
+#include "kernel_operator.h"
 #include <acl/acl.h>
-#include "aclrtlaunch_host_nano_kernel.h"
+#include "../hkv_hashtable/utils_kernel/utils_kernel.h"
 #include "debug.h"
-#endif
 
 namespace npu {
 namespace hkv {
+constexpr uint32_t THREAD_NUM_512 = 512;
+constexpr uint32_t THREAD_NUM_1024 = 1024;
+constexpr uint32_t THREAD_NUM_2048 = 2048;
 
-#if (!defined(__CCE__))
 static inline size_t SAFE_GET_GRID_SIZE(size_t N, int block_size) {
   return ((N) > std::numeric_limits<size_t>::max())
              ? (((1 << 30) - 1) / block_size + 1)
              : (((N)-1) / block_size + 1);
 }
-#endif
 
 static inline int SAFE_GET_BLOCK_SIZE(int block_size, int device = -1) {
   return std::min(2048, block_size);
@@ -104,7 +104,6 @@ static inline size_t KB(size_t n) { return n << 10; }
 
 constexpr inline bool ispow2(unsigned x) { return x && (!(x & (x - 1))); }
 
-#if (!defined(__CCE__))
 template <class S>
 S host_nano(aclrtStream stream = 0) {
   static_assert(
@@ -115,8 +114,7 @@ S host_nano(aclrtStream stream = 0) {
 
   NPU_CHECK(aclrtMalloc((void**)&d_clk, sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST));
 
-  ACLRT_LAUNCH_KERNEL(host_nano_kernel)
-  (1, 0, d_clk);
+  host_nano_kernel<S><<<1, 0, stream>>>(d_clk);
 
   NPU_CHECK(aclrtSynchronizeStream(stream));
 
@@ -132,7 +130,6 @@ static inline bool is_on_device(const void* ptr) {
 
   return (attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE);
 }
-#endif
 
 #if defined(__CCE__)
 template <typename T>

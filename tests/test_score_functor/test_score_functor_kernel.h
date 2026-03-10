@@ -1,5 +1,5 @@
 /* *
- * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@
 
 #include <cstdint>
 #include "kernel_operator.h"
-#include "../../../include/types.h"
-#include "../../../include/score_functor.h"
+#include "../../include/types.h"
+#include "../../include/score_functor.h"
 
 #define LAUNCH_BOUND(N) __attribute__((cce_launch_bounds(N)))
 
@@ -53,8 +53,8 @@ constexpr uint32_t TEST_THREAD_NUM = 128;
 template <typename K, typename V, typename S, int Strategy>
 __simt_vf__ __aicore__ LAUNCH_BOUND(TEST_THREAD_NUM)
 inline void test_desired_when_missed_vf(
-    GM_ADDR input_scores_gm, int key_idx, S epoch, S cur_cycle,
-    GM_ADDR output_gm) {
+    __gm__ void* input_scores_gm, int key_idx, S epoch, S cur_cycle,
+    __gm__ void* output_gm) {
 
   using SF = ScoreFunctor<K, V, S, Strategy>;
   __gm__ const S* input_scores = input_scores_gm != 0 
@@ -71,7 +71,7 @@ inline void test_desired_when_missed_vf(
 template <typename K, typename V, typename S, int Strategy>
 __simt_vf__ __aicore__ LAUNCH_BOUND(TEST_THREAD_NUM)
 inline void test_update_vf(
-    GM_ADDR bucket_gm, int key_pos, GM_ADDR input_scores_gm, int key_idx,
+    __gm__ void* bucket_gm, int key_pos, __gm__ void* input_scores_gm, int key_idx,
     S desired_score, bool new_insert) {
 
   using SF = ScoreFunctor<K, V, S, Strategy>;
@@ -90,7 +90,7 @@ inline void test_update_vf(
 template <typename K, typename V, typename S, int Strategy>
 __simt_vf__ __aicore__ LAUNCH_BOUND(TEST_THREAD_NUM)
 inline void test_update_with_digest_vf(
-    GM_ADDR bucket_keys_gm, uint32_t key_pos, GM_ADDR input_scores_gm,
+    __gm__ void* bucket_keys_gm, uint32_t key_pos, __gm__ void* input_scores_gm,
     uint32_t key_idx, S desired_score, uint32_t bucket_capacity,
     D digest, bool new_insert) {
 
@@ -110,7 +110,7 @@ inline void test_update_with_digest_vf(
 template <typename K, typename V, typename S, int Strategy>
 __simt_vf__ __aicore__ LAUNCH_BOUND(TEST_THREAD_NUM)
 inline void test_update_without_missed_bucket_vf(
-    GM_ADDR bucket_gm, int key_pos, GM_ADDR input_scores_gm, int key_idx,
+    __gm__ void* bucket_gm, int key_pos, __gm__ void* input_scores_gm, int key_idx,
     S epoch, S cur_cycle) {
 
   using SF = ScoreFunctor<K, V, S, Strategy>;
@@ -130,8 +130,8 @@ inline void test_update_without_missed_bucket_vf(
 template <typename K, typename V, typename S, int Strategy>
 __simt_vf__ __aicore__ LAUNCH_BOUND(TEST_THREAD_NUM)
 inline void test_update_without_missed_ptr_vf(
-    GM_ADDR bucket_keys_gm, uint32_t bucket_capacity, uint32_t key_pos,
-    GM_ADDR input_scores_gm, int key_idx, S epoch, S cur_cycle) {
+    __gm__ void* bucket_keys_gm, uint32_t bucket_capacity, uint32_t key_pos,
+    __gm__ void* input_scores_gm, int key_idx, S epoch, S cur_cycle) {
 
   using SF = ScoreFunctor<K, V, S, Strategy>;
 
@@ -143,6 +143,40 @@ inline void test_update_without_missed_ptr_vf(
     SF::update_without_missed(bucket_keys, bucket_capacity, key_pos,
                               input_scores, key_idx, epoch, cur_cycle);
   }
+}
+
+__global__ __vector__ void test_desired_when_missed_kernel(
+    int strategy, __gm__ void* input_scores, int key_idx,
+    uint64_t epoch, uint64_t cur_cycle, __gm__ void* output) {
+  DISPATCH_STRATEGY(test_desired_when_missed_vf, input_scores, key_idx, epoch, cur_cycle, output);
+}
+
+__global__ __vector__ void test_update_kernel(
+    int strategy, __gm__ void* bucket, int key_pos, __gm__ void* input_scores,
+    int key_idx, uint64_t desired_score, bool new_insert) {
+  DISPATCH_STRATEGY(test_update_vf, bucket, key_pos, input_scores, key_idx, desired_score, new_insert);
+}
+
+__global__ __vector__ void test_update_with_digest_kernel(
+    int strategy, __gm__ void* bucket_keys, uint32_t key_pos, __gm__ void* input_scores,
+    uint32_t key_idx, uint64_t desired_score, uint32_t bucket_capacity,
+    uint8_t digest, bool new_insert) {
+  DISPATCH_STRATEGY(test_update_with_digest_vf, bucket_keys, key_pos, input_scores,
+                    key_idx, desired_score, bucket_capacity, digest, new_insert);
+}
+
+__global__ __vector__ void test_update_without_missed_bucket_kernel(
+    int strategy, __gm__ void* bucket, int key_pos, __gm__ void* input_scores,
+    int key_idx, uint64_t epoch, uint64_t cur_cycle) {
+  DISPATCH_STRATEGY(test_update_without_missed_bucket_vf, bucket, key_pos,
+                    input_scores, key_idx, epoch, cur_cycle);
+}
+
+__global__ __vector__ void test_update_without_missed_ptr_kernel(
+    int strategy, __gm__ void* bucket_keys, uint32_t bucket_capacity, uint32_t key_pos,
+    __gm__ __gm__ void* input_scores, int key_idx, uint64_t epoch, uint64_t cur_cycle) {
+  DISPATCH_STRATEGY(test_update_without_missed_ptr_vf, bucket_keys, bucket_capacity,
+                    key_pos, input_scores, key_idx, epoch, cur_cycle);
 }
 
 }  // namespace hkv

@@ -13,85 +13,69 @@ if ("${RUN_MODE}" STREQUAL "sim")
 endif()
 
 file(GLOB TEST_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
-list(REMOVE_ITEM TEST_SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_aclnn_helper.cpp)
 
-add_executable(test_main ${TEST_SRC_FILES})
+set_source_files_properties(
+    ${TEST_SRC_FILES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_score_functor.cpp
+    PROPERTIES LANGUAGE ASC
+)
+
+list(REMOVE_ITEM TEST_SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_aclnn_helper.cpp)
+add_executable(test_main 
+  ${TEST_SRC_FILES}
+)
+
+target_compile_options(test_main PRIVATE
+    # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+    -g -O2
+)
 target_link_libraries(test_main PRIVATE
-  $<BUILD_INTERFACE:$<$<OR:$<STREQUAL:${RUN_MODE},npu>,$<STREQUAL:${RUN_MODE},sim>>:host_intf_pub>>
-  $<BUILD_INTERFACE:$<$<STREQUAL:${RUN_MODE},cpu>:ascendcl>>
-  ascendc_kernels_${RUN_MODE}
+  m
   graph_base
-  hkv_includes
   tiling_api
+  register
   platform
+  hkv_includes
   opapi
   nnopbase
-  kernel_lib
-)
-target_compile_options(test_main PRIVATE
-  -DUSE_DUMP_KERNEL_ASC
 )
 add_test(NAME test_main COMMAND test_main)
 
-# 开启测试宏会影响其他用例
+
 add_executable(test_aclnn_helper ${CMAKE_CURRENT_SOURCE_DIR}/test_aclnn_helper.cpp)
+target_compile_options(test_aclnn_helper PRIVATE
+    # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+    -g -O2
+)
 target_link_libraries(test_aclnn_helper PRIVATE
-  $<BUILD_INTERFACE:$<$<OR:$<STREQUAL:${RUN_MODE},npu>,$<STREQUAL:${RUN_MODE},sim>>:host_intf_pub>>
-  $<BUILD_INTERFACE:$<$<STREQUAL:${RUN_MODE},cpu>:ascendcl>>
-  ascendc_kernels_${RUN_MODE}
+  m
   graph_base
-  hkv_includes
   tiling_api
+  register
   platform
+  hkv_includes
   opapi
   nnopbase
   -lpthread
-  kernel_lib
-)
-target_compile_options(test_aclnn_helper PRIVATE
-  -DUSE_DUMP_KERNEL_ASC
 )
 add_test(NAME test_aclnn_helper COMMAND test_aclnn_helper)
 
-# test_score_functor
-if("${RUN_MODE}" STREQUAL "npu" OR "${RUN_MODE}" STREQUAL "sim")
-  set(TEST_KERNEL_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_desired_when_missed_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_update_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_update_with_digest_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_update_without_missed_bucket_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_update_without_missed_ptr_kernel.cpp
-  )
 
-  ascendc_library(test_score_functor_kernels_${RUN_MODE} STATIC ${TEST_KERNEL_FILES})
-  # 由于ascendc_library编译一定会将算子头文件安装出去，那么这里只能在安装完成后删掉冗余的测试算子头文件
-  install(CODE "
-    set(DELETE_DIR \${CMAKE_INSTALL_PREFIX}/include/test_score_functor_kernels_${RUN_MODE})
-    if(EXISTS \${DELETE_DIR} AND IS_DIRECTORY \${DELETE_DIR})
-      message(STATUS \"Removing unnecessary directory: \${DELETE_DIR}\")
-      file(REMOVE_RECURSE \${DELETE_DIR})
-    endif()
-  ")
-endif()
-
-# 编译测试可执行文件
-add_executable(test_score_functor
-  ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_score_functor.cpp
+add_executable(test_score_functor ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor/test_score_functor.cpp)
+target_compile_options(test_score_functor PRIVATE
+    # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+    -g -O2
 )
 target_link_libraries(test_score_functor PRIVATE
-  $<BUILD_INTERFACE:$<$<OR:$<STREQUAL:${RUN_MODE},npu>,$<STREQUAL:${RUN_MODE},sim>>:host_intf_pub>>
-  $<BUILD_INTERFACE:$<$<STREQUAL:${RUN_MODE},cpu>:ascendcl>>
-  $<$<OR:$<STREQUAL:${RUN_MODE},npu>,$<STREQUAL:${RUN_MODE},sim>>:test_score_functor_kernels_${RUN_MODE}>
-  ascendc_kernels_${RUN_MODE}
+  m
   graph_base
-  hkv_includes
   tiling_api
   platform
+  hkv_includes
   opapi
   nnopbase
-  kernel_lib
-)
-target_compile_options(test_score_functor PRIVATE
-  -DUSE_DUMP_KERNEL_ASC
 )
 add_test(NAME test_score_functor COMMAND test_score_functor)
