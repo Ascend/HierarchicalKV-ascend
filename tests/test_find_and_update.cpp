@@ -122,13 +122,13 @@
    copy_to_device(device_keys, host_keys.data(), key_num);
    copy_to_device(device_values, host_values.data(), key_num * dim);
  
-   table.insert_or_assign(key_num, device_keys, device_values, nullptr, stream_);
-   ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+   table.insert_or_assign(key_num, device_keys, device_values, nullptr);
+   ASSERT_EQ(aclrtSynchronizeStream(0), ACL_ERROR_NONE);
    EXPECT_EQ(table.size(), key_num);
  
    table.find_and_update(key_num, device_keys, device_values_ptr, device_found,
-                         nullptr, stream_, true);
-   ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+                         nullptr);
+   ASSERT_EQ(aclrtSynchronizeStream(0), ACL_ERROR_NONE);
  
    auto host_found = std::unique_ptr<bool[]>(new bool[key_num]());
    copy_to_host(host_found.get(), device_found, key_num);

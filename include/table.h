@@ -141,8 +141,6 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
    */
   HKV_CHECK(start < end,
                "initialize_buckets, start should be less than end!");
-  aclrtStream default_stream;
-  aclrtCreateStream(&default_stream);
   size_t buckets_num = end - start;
   const size_t total_size_of_vectors =
       buckets_num * (*table)->bucket_max_size * sizeof(V) * (*table)->dim;
@@ -187,17 +185,16 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
         size_t index = start + num_of_allocated_buckets + j;
         __gm__ V* address =
           (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
-        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets, index, address);
+        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets, index, address);
       } else {
         V* h_ptr =
             (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
         __gm__ V* address = nullptr;
         NPU_CHECK(aclrtHostRegister(h_ptr, slice_real_size, ACL_HOST_REGISTER_MAPPED, (void**)&address));
         size_t index = start + num_of_allocated_buckets + j;
-        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets, index, address);
+        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets, index, address);
       }
     }
-    aclrtSynchronizeStream(default_stream);
     NPU_CHECK(aclrtSynchronizeDevice());
     num_of_allocated_buckets += num_of_buckets_in_one_slice;
   }
@@ -239,27 +236,24 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
                        actual_bucket_memory_size * num_of_buckets);
     }
 
-    allocate_bucket_others_kernel<K, V, S><<<1, 0, default_stream>>>((*table)->buckets,
+    allocate_bucket_others_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets,
       actual_bucket_memory_size, num_of_buckets, i, address, reserve_size, bucket_max_size);
   }
-  aclrtSynchronizeStream(default_stream);
   NPU_CHECK(aclrtSynchronizeDevice());
 
   {
     const size_t block_size = 512;
     const size_t N = end - start + 1;
     const int grid_size = SAFE_GET_GRID_SIZE(N, block_size);
-    create_atomic_keys_kernel<K, V, S><<<grid_size, 0, default_stream>>>((*table)->buckets,
+    create_atomic_keys_kernel<K, V, S><<<grid_size, 0, 0>>>((*table)->buckets,
       start, end, (*table)->bucket_max_size);
   }
 
   {
-    create_atomic_scores_kernel<K, V, S><<<block_dim, 0, default_stream>>>((*table)->buckets,
+    create_atomic_scores_kernel<K, V, S><<<block_dim, 0, 0>>>((*table)->buckets,
       start, end, (*table)->bucket_max_size);
   }
-  aclrtSynchronizeStream(default_stream);
   NPU_CHECK(aclrtSynchronizeDevice());
-  aclrtDestroyStream(default_stream);
   NpuCheckError();
 }
 
