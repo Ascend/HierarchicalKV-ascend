@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include "debug.h"
 #include "hkv_hashtable.h"
-#include "tests/test_util.h"
+#include "hkv_hashtable/utils_kernel/utils_kernel.h"
 #include "tiling/platform/platform_ascendc.h"
 
 using std::cerr;
@@ -46,6 +46,44 @@ using TableOptions = npu::hkv::HashTableOptions;
 #define TOSTRING(x) STRINGIFY(x)
 
 static uint32_t core_num_aiv = 0;
+
+template <class K, class S, class V, size_t DIM = 16>
+void create_random_keys(K* h_keys, S* h_scores, V* h_vectors, size_t KEY_NUM,
+                        size_t range = std::numeric_limits<uint64_t>::max()) {
+  std::unordered_set<K> numbers;
+  std::random_device rd;
+  std::mt19937_64 eng(rd());
+  std::uniform_int_distribution<K> distr;
+  int i = 0;
+
+  while (numbers.size() < KEY_NUM) {
+    numbers.insert(distr(eng) % range);
+  }
+  for (const K num : numbers) {
+    h_keys[i] = num;
+    if (h_scores != nullptr) {
+      h_scores[i] = num;
+    }
+    if (h_vectors != nullptr) {
+      for (size_t j = 0; j < DIM; j++) {
+        h_vectors[i * DIM + j] = static_cast<float>(num * 0.00001);
+      }
+    }
+    i++;
+  }
+}
+
+template <class V>
+void read_from_ptr(V** __restrict src, V* __restrict dst, const size_t dim,
+                   size_t n, aclrtStream stream) {
+  const size_t block_size = 1024;
+  const size_t N = n * dim;
+  const size_t grid_size = (N - 1) / block_size + 1;
+  HKV_CHECK((grid_size <= 65535), "Pointer is already assigned.");
+
+  npu::hkv::read_from_ptr_kernel<V>
+      <<<grid_size, 0, stream>>>(reinterpret_cast<void*>(src), dst, dim, N);
+}
 
 void demo_hkv_hashtable() {
   try {
@@ -87,8 +125,8 @@ void demo_hkv_hashtable() {
     NPU_CHECK(aclrtMemset(h_vectors, key_num_per_op * sizeof(V) * dim, 0,
                           key_num_per_op * sizeof(V) * dim));
 
-    test_util::create_random_keys<K, S, V, dim>(h_keys, h_scores, h_vectors,
-                                                key_num_per_op);
+    create_random_keys<K, S, V, dim>(h_keys, h_scores, h_vectors,
+                                     key_num_per_op);
 
     K* d_keys;
     S* d_scores;
@@ -136,8 +174,7 @@ void demo_hkv_hashtable() {
     table->find_or_insert(key_num_per_op, d_keys, d_vectors_ptr, d_found,
                           d_scores, stream);
     NPU_CHECK(aclrtSynchronizeStream(stream));
-    test_util::read_from_ptr(d_vectors_ptr, d_vectors, dim, key_num_per_op,
-                             stream);
+    read_from_ptr(d_vectors_ptr, d_vectors, dim, key_num_per_op, stream);
     NPU_CHECK(aclrtSynchronizeStream(stream));
 
     NPU_CHECK(aclrtMemcpy(h_found, key_num_per_op * sizeof(bool), d_found,
@@ -213,7 +250,8 @@ int32_t main(int32_t argc, char* argv[]) {
   const char* soc_version = TOSTRING(SOC_VERSION);
   auto ascendc_platform =
       platform_ascendc::PlatformAscendCManager::GetInstance(soc_version);
-  HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed, please check SOC_VERSION!");
+  HKV_CHECK(ascendc_platform != nullptr,
+            "Get ascendc platform info failed, please check SOC_VERSION!");
   block_dim = ascendc_platform->GetCoreNumAiv();
   core_num_aiv = block_dim;
   std::cout << "Soc version: " << soc_version
@@ -226,7 +264,8 @@ int32_t main(int32_t argc, char* argv[]) {
     device_id = (device_id_env != nullptr) ? std::stoi(device_id_env) : 0;
   } catch (...) {
     device_id = 0;
-    std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0" << std::endl;
+    std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0"
+              << std::endl;
   }
   NPU_CHECK(aclrtSetDevice(device_id));
   std::cout << "aclrtGetSocName:" << aclrtGetSocName() << std::endl;

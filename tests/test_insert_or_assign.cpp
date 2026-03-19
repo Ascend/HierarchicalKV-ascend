@@ -21,111 +21,18 @@
 #include <vector>
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
+#include "test_device_data.h"
 #include "test_util.h"
 
 using namespace std;
 using namespace npu::hkv;
 using namespace test_util;
 
-constexpr size_t DEFAULT_DIM = 8;
-constexpr size_t DEFAULT_CAPACITY = 128UL * 1024;
-
-template <typename K, typename V, typename S>
-unique_ptr<HashTable<K, V, S>> get_table(size_t dim, size_t capacity,
-                                         size_t num_of_buckets_per_alloc) {
-  using Table = HashTable<K, V, S>;
-  auto table = make_unique<Table>();
-
-  size_t total_mem = 0;
-  size_t free_mem = 0;
-  constexpr size_t hbm_for_values = 4UL << 30;
-  EXPECT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
-            ACL_ERROR_NONE);
-  EXPECT_GT(free_mem, hbm_for_values)
-      << "free HBM is not enough free:" << free_mem
-      << "need:" << hbm_for_values;
-
-  HashTableOptions options{
-      .init_capacity = capacity,
-      .max_capacity = capacity,
-      .max_hbm_for_vectors = hbm_for_values,
-      .dim = dim,
-      .io_by_cpu = false,
-      .num_of_buckets_per_alloc = num_of_buckets_per_alloc,
-  };
-
-  table->init(options);
-
-  return table;
-}
-
-template <typename K, typename V, typename S>
-unique_ptr<HashTable<K, V, S>> get_default_table() {
-  return get_table<K, V, S>(DEFAULT_DIM, DEFAULT_CAPACITY, 1);
-}
-
-template <typename K, typename V, typename S>
-class DeviceData {
- public:
-  DeviceData() = default;
-
-  ~DeviceData() {
-    if (device_keys != nullptr) {
-      EXPECT_EQ(aclrtFree(device_keys), ACL_ERROR_NONE);
-      EXPECT_EQ(aclrtFree(device_values), ACL_ERROR_NONE);
-      EXPECT_EQ(aclrtFree(device_values_ptr), ACL_ERROR_NONE);
-      EXPECT_EQ(aclrtFree(device_found), ACL_ERROR_NONE);
-      EXPECT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
-      EXPECT_EQ(aclrtDestroyStream(stream), ACL_ERROR_NONE);
-    }
-  }
-
-  void malloc(size_t key_num, size_t dim = DEFAULT_DIM) {
-    ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_keys),
-                          key_num * each_key_size, ACL_MEM_MALLOC_HUGE_FIRST),
-              ACL_ERROR_NONE);
-    ASSERT_EQ(
-        aclrtMalloc(reinterpret_cast<void**>(&device_values),
-                    key_num * each_value_size * dim, ACL_MEM_MALLOC_HUGE_FIRST),
-        ACL_ERROR_NONE);
-    ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_values_ptr),
-                          key_num * sizeof(V*), ACL_MEM_MALLOC_HUGE_FIRST),
-              ACL_ERROR_NONE);
-    ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_found),
-                          key_num * sizeof(bool), ACL_MEM_MALLOC_HUGE_FIRST),
-              ACL_ERROR_NONE);
-    ASSERT_EQ(aclrtCreateStream(&stream), ACL_ERROR_NONE);
-  }
-
-  void copy_keys(vector<K>& host_keys, size_t key_num) {
-    ASSERT_EQ(
-        aclrtMemcpy(device_keys, key_num * each_key_size, host_keys.data(),
-                    key_num * each_key_size, ACL_MEMCPY_HOST_TO_DEVICE),
-        ACL_ERROR_NONE);
-  }
-
-  void copy_values(vector<V>& host_values, size_t key_num,
-                   size_t dim = DEFAULT_DIM) {
-    ASSERT_EQ(aclrtMemcpy(device_values, key_num * each_value_size * dim,
-                          host_values.data(), key_num * each_value_size * dim,
-                          ACL_MEMCPY_HOST_TO_DEVICE),
-              ACL_ERROR_NONE);
-  }
-
-  aclrtStream stream = nullptr;
-  K* device_keys = nullptr;
-  V* device_values = nullptr;
-  V** device_values_ptr = nullptr;
-  bool* device_found = nullptr;
-  size_t each_key_size = sizeof(K);
-  size_t each_score_size = sizeof(S);
-  size_t each_value_size = sizeof(V);
-};
-
 template <typename K, typename V, typename S>
 void check_result(vector<V>& host_values, size_t key_num,
                   DeviceData<K, V, S>& device_data,
-                  size_t expect_found_num = numeric_limits<size_t>::max(), size_t dim = DEFAULT_DIM) {
+                  size_t expect_found_num = numeric_limits<size_t>::max(),
+                  size_t dim = DEFAULT_DIM) {
   expect_found_num = expect_found_num == numeric_limits<size_t>::max()
                          ? key_num
                          : expect_found_num;
@@ -149,15 +56,13 @@ void check_result(vector<V>& host_values, size_t key_num,
       ASSERT_NE(real_values_ptr[i], nullptr);
       found_num++;
 
-      ASSERT_EQ(aclrtMemcpy(real_values.data(),
-                            dim * device_data.each_value_size,
-                            real_values_ptr[i],
-                            dim * device_data.each_value_size,
-                            ACL_MEMCPY_DEVICE_TO_HOST),
-                ACL_ERROR_NONE);
-      vector<V> expect_values(
-          host_values.begin() + i * dim,
-          host_values.begin() + i * dim + dim);
+      ASSERT_EQ(
+          aclrtMemcpy(real_values.data(), dim * device_data.each_value_size,
+                      real_values_ptr[i], dim * device_data.each_value_size,
+                      ACL_MEMCPY_DEVICE_TO_HOST),
+          ACL_ERROR_NONE);
+      vector<V> expect_values(host_values.begin() + i * dim,
+                              host_values.begin() + i * dim + dim);
       ASSERT_EQ(expect_values, real_values);
     } else {
       ASSERT_EQ(real_values_ptr[i], nullptr);

@@ -44,11 +44,13 @@
 #include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel.h"
 #include "../hkv_hashtable/insert_or_assign_kernel/insert_or_assign_kernel.h"
 #include "../hkv_hashtable/insert_and_evict_kernel/insert_and_evict_kernel.h"
+#include "../hkv_hashtable/traverse_kernel/traverse_kernel.h"
 #include "aclnn_helper.h"
 #include "aclnnop/aclnn_reduce_sum.h"
 #include "bucket_memory_pool_manager.h"
 #include "hashtable_options.h"
 #include "memory_pool.h"
+#include "simt_vf_dispatcher.h"
 #include "table.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "types.h"
@@ -2010,8 +2012,7 @@ class HashTable : public HashTableBase<K, V, S> {
    *
    * @tparam ExecutionFunc A functor type with a template signature `<K, V, S>`.
    * It should define an operator with the signature:
-   * `__device__ void operator()(const K&, V*, S*,
-   * cg::thread_block_tile<GroupSize>&)`.
+   * `__device__ void operator()(const K&, V*, S*, int)`.
    *
    * @param first The first element to which the function object will be
    * applied.
@@ -2029,7 +2030,17 @@ class HashTable : public HashTableBase<K, V, S> {
   template <typename ExecutionFunc>
   void for_each(const size_type first, const size_type last, ExecutionFunc& f,
                 aclrtStream stream = 0) {
-    std::cout << "[Unsupport for_each yet]\n";
+    if (first >= table_->capacity || last > table_->capacity || first >= last) {
+      return;
+    }
+
+    uint64_t n = last - first;
+    int32_t cg_size = GetCGSize(options_.dim, n);
+    DISPATCH_GROUP_SIZE(
+        cg_size,
+        (traverse_kernel<K, V, S, ExecutionFunc, GROUP_SIZE>
+         <<<block_dim_, 0, stream>>>(table_->buckets, options_.max_bucket_size,
+                                     options_.dim, n, first, f)));
 
     NpuCheckError();
   }
@@ -2474,7 +2485,7 @@ class HashTable : public HashTableBase<K, V, S> {
    * 
    * @note On `ValueMoveOpt`, size is 8 or 16, which is more suitable for NPUs.
    */
-  ValueMoveOpt GetValueMoveOpt(uint32_t move_byte_per_value) {
+  inline ValueMoveOpt GetValueMoveOpt(uint32_t move_byte_per_value) {
     ValueMoveOpt opt;
     opt.size = 1;
     opt.cg_size = 1;
@@ -2497,6 +2508,20 @@ class HashTable : public HashTableBase<K, V, S> {
     opt.is_large_size = move_byte_per_value >= 4096;
 
     return opt;
+  }
+
+  inline int32_t GetCGSize(size_t dim, uint64_t n) {
+    // 协程组数量32/16/8/1来选择
+    if (dim >= 32 && n % 32 == 0) {
+      return 32;
+    }
+    if (dim >= 16 && n % 16 == 0) {
+      return 16;
+    }
+    if (dim >= 8 && n % 8 == 0) {
+      return 8;
+    }
+    return 1;
   }
 
  private:

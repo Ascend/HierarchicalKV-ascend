@@ -68,6 +68,11 @@ enum DataSize { BYTE_1 = 1, BYTE_2 = 2, BYTE_4 = 4, BYTE_8 = 8, BYTE_16 = 16 };
 #define DISPATCH_GROUP_SIZE(group_size, FUNC) \
   do {                                        \
     switch (group_size) {                     \
+      case 1: {                               \
+        constexpr int32_t GROUP_SIZE = 1;     \
+        FUNC;                                 \
+        break;                                \
+      }                                       \
       case 2: {                               \
         constexpr int32_t GROUP_SIZE = 2;     \
         FUNC;                                 \
