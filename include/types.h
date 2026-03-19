@@ -92,6 +92,12 @@ __forceinline__ __device__ D empty_digest() {
   return static_cast<D>(hashed_key >> 32);
 }
 
+template <typename K>
+__forceinline__ __device__ D reclaim_digest() {
+  const K hashed_key = Murmur3HashDevice(static_cast<K>(RECLAIM_KEY));
+  return static_cast<D>(hashed_key >> 32);
+}
+
 __forceinline__ __device__ uint32_t vcmpeq4(uint32_t a, uint32_t b) {
   uint32_t eq = ~(a ^ b);
   uint32_t mask0 = ((eq >> 0) & 0xFF) == 0xFF ? 0x000000FF : 0;
