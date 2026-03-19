@@ -4,7 +4,7 @@ project(Ascend_c LANGUAGES ASC CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(RUN_MODE "npu" CACHE STRING "sim/npu")
-set(SOC_VERSION "Ascend910_9589" CACHE STRING "system on chip type")
+set(SOC_VERSION "Ascend950PR_9579" CACHE STRING "system on chip type")
 set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
   CACHE STRING "ASCEND CANN package installation directory"
 )

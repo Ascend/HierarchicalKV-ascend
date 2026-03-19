@@ -24,7 +24,7 @@ Usage: ${0##*} [OPTIONS] [ARGUMENTS]
 OPTIONS（可选参数）：
     -h, --help                打印帮助信息并退出
     -r, --run-mode MODE       指定编译方式MODE，可选择CPU仿真、NPU上板。支持参数为[sim / npu]，默认值为npu。
-    -v, --soc-version VERSION 指定昇腾AI处理器型号VERSION，默认值为Ascend910_9579。当前仅支持Ascend910_9579，请勿修改。
+    -v, --soc-version VERSION 指定昇腾AI处理器型号VERSION，默认值为Ascend950PR_9579。
     -i, --install-path PATH   指定cann的安装路径PATH，默认值为环境变量ASCEND_INSTALL_PATH。
     -b, --build-type TYPE     指定构建类型TYPE，默认值为"Release"。
     -p, --install-prefix PATH 指定安装路径PATH，默认为当前路径下的out目录。
