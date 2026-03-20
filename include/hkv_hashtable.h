@@ -1535,14 +1535,16 @@ class HashTable : public HashTableBase<K, V, S> {
     constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
     if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
       assign_scores_kernel_with_filter<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-        static_cast<void*>(table_->buckets), table_->capacity, options_.max_bucket_size,
-        options_.dim, static_cast<void*>(const_cast<key_type*>(keys)),
-        static_cast<void*>(const_cast<score_type*>(scores)), n, global_epoch_,
+        table_->buckets, table_->capacity, options_.max_bucket_size,
+        options_.dim, const_cast<key_type*>(keys),
+        const_cast<score_type*>(scores), n, global_epoch_,
         table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     } else {
-      throw std::runtime_error(
-        "Not support update score when keys are not unique or bucket "
-        "capacity is smaller than " + std::to_string(MinBucketCapacityFilter) + ".");
+      assign_scores_kernel_with_io<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->capacity, options_.max_bucket_size,
+        options_.dim, const_cast<key_type*>(keys),
+        const_cast<score_type*>(scores), n, global_epoch_,
+        table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     }
     NpuCheckError();
   }

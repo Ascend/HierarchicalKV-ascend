@@ -22,6 +22,8 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <simt_api/device_atomic_functions.h>
+#include <simt_api/device_warp_functions.h>
 #include "cuda2npu.h"
 #include "utils.h"
 namespace npu {
@@ -455,5 +457,40 @@ class LocalKVFile : public BaseKVFile<K, V, S> {
   FILE* values_fp_;
   FILE* scores_fp_;
 };
+
+template <typename K, typename S, int32_t TILE_SIZE>
+__forceinline__ __device__ OccupyResult find_and_lock_for_update(
+    __gm__ K* bucket_keys, const uint32_t bucket_max_size, const K& key,
+    uint32_t& key_pos, const uint32_t lane_id) {
+  const uint32_t start_pos = key_pos;
+
+  for (uint32_t tile_offset = 0; tile_offset < bucket_max_size;
+       tile_offset += TILE_SIZE) {
+    uint32_t current_pos =
+        (start_pos + tile_offset + lane_id) % bucket_max_size;
+
+    K expected_key;
+    uint32_t vote;
+    do {
+      expected_key = asc_atomic_cas(bucket_keys + current_pos, key,
+                                     static_cast<K>(LOCKED_KEY));
+      bool locked = (expected_key == key);
+
+      vote = asc_ballot(locked);
+      if (vote) {
+        int32_t src_lane = __ffs(static_cast<int32_t>(vote)) - 1;
+        key_pos = asc_shfl(current_pos, src_lane, TILE_SIZE);
+        return OccupyResult::DUPLICATE;
+      }
+
+      vote = asc_ballot(expected_key == static_cast<K>(EMPTY_KEY));
+      if (vote) {
+        return OccupyResult::REFUSED;
+      }
+      vote = asc_ballot(expected_key == static_cast<K>(LOCKED_KEY));
+    } while (vote != 0);
+  }
+  return OccupyResult::REFUSED;
+}
 }  // namespace hkv
 }  // namespace npu
