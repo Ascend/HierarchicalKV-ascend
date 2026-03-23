@@ -36,6 +36,7 @@ namespace hkv {
 constexpr uint32_t THREAD_NUM_512 = 512;
 constexpr uint32_t THREAD_NUM_1024 = 1024;
 constexpr uint32_t THREAD_NUM_2048 = 2048;
+constexpr uint32_t BYTE_MASK = 0x01010101;
 
 static inline size_t SAFE_GET_GRID_SIZE(size_t N, int block_size) {
   return ((N) > std::numeric_limits<size_t>::max())

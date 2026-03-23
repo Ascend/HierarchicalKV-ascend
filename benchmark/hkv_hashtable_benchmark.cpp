@@ -536,6 +536,7 @@ void print_title_a() {
        << "| find_and_update "
        << "|   find* "
        << "| export_batch "
+       << "| assign "
        << "| assign_scores "
        << "| assign_values "
        << "| insert_and_evict ";
@@ -553,6 +554,8 @@ void print_title_a() {
        << "|--------:"
        //<< "| export_batch "
        << "|-------------:"
+       //<< "| assign "
+       << "|-------:"
        //<< "| assign_scores "
        << "|--------------:"
        //<< "| assign_values "
@@ -662,6 +665,10 @@ void test_main(std::vector<API_Select>& apis, const size_t dim,
           std::cout << rep(7);
           break;
         }
+        case API_Select::assign: {
+          std::cout << rep(1);
+          break;
+        }
         case API_Select::assign_scores: {
           std::cout << rep(8);
           break;
@@ -725,6 +732,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::find_and_update,
         API_Select::find_ptr,
         API_Select::export_batch,
+        API_Select::assign,
         API_Select::assign_scores,
         API_Select::assign_values,
         API_Select::insert_and_evict,

@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 
-#ifndef ASCENDC_ASSIGN_VALUES_KERNEL_H_
-#define ASCENDC_ASSIGN_VALUES_KERNEL_H_
+#ifndef ASCENDC_ASSIGN_KERNEL_H_
+#define ASCENDC_ASSIGN_KERNEL_H_
 
-#include <simt_api/common_functions.h>
 #include <cstdint>
 #include "../../include/score_functor.h"
 #include "../../include/simt_vf_dispatcher.h"
@@ -29,12 +28,13 @@ namespace npu {
 namespace hkv {
 using namespace AscendC;
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-          typename VecV = int32_t>
+          typename VecV = int32_t, int Strategy = -1>
 __simt_vf__ __aicore__
-LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
+LAUNCH_BOUND(THREAD_NUM_512) inline void assign_kernel_with_digest_vf(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
-    uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys,
-    __gm__ void* values_addr_gm, uint64_t n, uint32_t thread_all,
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys,
+    const __gm__ void* values_addr_gm, const __gm__ S* scores, uint64_t n,
+    uint32_t thread_all, uint64_t global_epoch, uint64_t system_cycle,
     uint32_t block_index, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
     uint64_t n_align_warp, int32_t group_size) {
@@ -48,12 +48,11 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
     return;
   }
   using BUCKET = Bucket<K, V, S>;
+  using ScoreFunctor = ScoreFunctor<K, V, S, Strategy>;
   K key{static_cast<K>(EMPTY_KEY)};
   S score{static_cast<S>(EMPTY_SCORE)};
-
-  __gm__ VecV* __restrict__ values =
-      reinterpret_cast<__gm__ VecV*>(values_addr_gm);
-
+  const __gm__ VecV* __restrict__ values =
+      reinterpret_cast<const __gm__ VecV*>(values_addr_gm);
   __gm__ K* bucket_keys_ptr = buckets->keys_;
   OccupyResult occupy_result{OccupyResult::INITIAL};
 
@@ -101,7 +100,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
         // and if they are equal, set the corresponding byte in the result to
         // 0xff.
         uint32_t cmp_result = vcmpeq4(probe_digests, target_digests);
-        cmp_result &= 0x01010101;
+        cmp_result &= BYTE_MASK;
         while (cmp_result != 0 && !done) {
           // NPU uses little endian,
           // and the lowest byte in register stores in the lowest address.
@@ -117,12 +116,15 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
           if (try_key == key) {
             occupy_result = OccupyResult::DUPLICATE;
             key_pos = possible_pos;
+            ScoreFunctor::update_without_missed(
+                bucket_keys_ptr, bucket_max_size, key_pos, scores, kv_idx,
+                global_epoch, system_cycle);
             done = true;
           }
         }
         if (!done) {
           cmp_result = vcmpeq4(probe_digests, empty_digests_);
-          cmp_result &= 0x01010101;
+          cmp_result &= BYTE_MASK;
           while (cmp_result != 0 && !done) {
             const uint32_t index =
                 (__ffs(static_cast<int32_t>(cmp_result)) - 1) >> 3;
@@ -171,26 +173,16 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
   }
 }
 
-template <typename V, int32_t TILE_SIZE>
-__forceinline__ __device__ void copy_vector(__gm__ const V* src, __gm__ V* dst,
-                                            const uint32_t dim,
-                                            const uint32_t lane_id) {
-  for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {
-    V val = src[i];
-    __stg<ST_L2CacheType::L2_CACHE_HINT_NORMAL_FV, L1CacheType::NON_CACHEABLE>(
-        dst + i, val);
-  }
-}
-
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-          int32_t TILE_SIZE = 32>
+          int Strategy = -1, int32_t TILE_SIZE = 32>
 __simt_vf__ __aicore__
-LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
+LAUNCH_BOUND(THREAD_NUM_512) inline void assign_kernel_with_io_vf(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
-    uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
-    uint64_t n, uint32_t thread_all, uint32_t block_index,
-    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
-    uint64_t capacity_divisor_shift) {
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys,
+    const __gm__ V* values, const __gm__ S* scores, uint64_t n,
+    uint32_t thread_all, uint64_t global_epoch, uint64_t system_cycle,
+    uint32_t block_index, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
   if (!buckets) {
     return;
   }
@@ -200,6 +192,7 @@ LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
   if (!values) {
     return;
   }
+  using ScoreFunctor = ScoreFunctor<K, V, S, Strategy>;
   auto lane_id = threadIdx.x % TILE_SIZE;
   const uint64_t N = n * TILE_SIZE;
 
@@ -226,6 +219,11 @@ LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
     if (occupy_result == OccupyResult::DUPLICATE) {
       copy_vector<V, TILE_SIZE>(values + key_idx * dim,
                                 bucket_vectors + key_pos * dim, dim, lane_id);
+      if (lane_id == 0) {
+        ScoreFunctor::update_without_missed(bucket_keys, bucket_max_size,
+                                            key_pos, scores, key_idx,
+                                            global_epoch, system_cycle);
+      }
       asc_threadfence();
     }
     if (lane_id == 0) {
@@ -234,39 +232,42 @@ LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
   }
 }
 
-template <class K, class V, class S>
-__global__ __vector__ void assign_values_kernel(
+template <class K, class V, class S, int Strategy = -1>
+__global__ __vector__ void assign_kernel(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
-    uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ void* values,
-    uint64_t n, uint32_t value_size, uint32_t max_bucket_shift,
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys,
+    const __gm__ void* values, const __gm__ S* scores, uint64_t n,
+    uint64_t global_epoch, uint32_t value_size, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
     uint64_t n_align_warp, int32_t group_size) {
-  constexpr uint32_t thread_num = 512;
-  const uint32_t thread_all = thread_num * GetBlockNum();
-
+  const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
+  uint64_t system_cycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
   DISPATCH_VALUE_SIZE(
       value_size,
-      (asc_vf_call<assign_values_kernel_with_digest_vf<K, V, S, DTYPE>>(
-          dim3{static_cast<uint32_t>(thread_num)}, buckets, capacity,
-          bucket_max_size, dim, keys, values, n, thread_all, GetBlockIdx(),
-          max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift,
-          n_align_warp, group_size)));
+      (asc_vf_call<assign_kernel_with_digest_vf<K, V, S, DTYPE, Strategy>>(
+          dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, capacity,
+          bucket_max_size, dim, keys, values, scores, n, thread_all,
+          global_epoch, system_cycle, GetBlockIdx(), max_bucket_shift,
+          capacity_divisor_magic, capacity_divisor_shift, n_align_warp,
+          group_size)));
 }
 
-template <class K, class V, class S>
-__global__ __vector__ void assign_values_kernel_with_io(
+template <class K, class V, class S, int Strategy = -1>
+__global__ __vector__ void assign_kernel_with_io(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
-    uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
-    uint64_t n, uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
-    uint64_t capacity_divisor_shift) {
-  constexpr uint32_t thread_num = 1024;
-  const uint32_t thread_all = thread_num * GetBlockNum();
-  asc_vf_call<assign_values_kernel_with_io_vf<K, V, S>>(
-      dim3{static_cast<uint32_t>(thread_num)}, buckets, capacity,
-      bucket_max_size, dim, keys, values, n, thread_all, GetBlockIdx(),
-      max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift);
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys,
+    const __gm__ V* values, const __gm__ S* scores, uint64_t n,
+    uint64_t global_epoch, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
+  const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
+  uint64_t system_cycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+  asc_vf_call<assign_kernel_with_io_vf<K, V, S, Strategy>>(
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, capacity,
+      bucket_max_size, dim, keys, values, scores, n, thread_all, global_epoch,
+      system_cycle, GetBlockIdx(), max_bucket_shift, capacity_divisor_magic,
+      capacity_divisor_shift);
 }
 }  // namespace hkv
 }  // namespace npu
 
-#endif  // ASCENDC_ASSIGN_VALUES_KERNEL_H_
+#endif  // ASCENDC_ASSIGN_KERNEL_H_
