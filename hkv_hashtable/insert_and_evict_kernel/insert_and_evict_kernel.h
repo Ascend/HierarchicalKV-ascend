@@ -27,7 +27,7 @@
  namespace hkv {
  using namespace AscendC;
  
- template <typename K = uint64_t, typename V = float, typename S = uint64_t, typename VecV = int64_t, int Strategy = -1>
+ template <typename K = uint64_t, typename V = float, typename S = uint64_t, typename VecV = int32_t, int Strategy = -1>
  __simt_vf__ __aicore__
  LAUNCH_BOUND(THREAD_NUM_512) inline void insert_and_evict_kernel_vf(
      __gm__ Bucket<K, V, S>* buckets_addr_gm,  __gm__ int* buckets_size_addr_gm, uint64_t capacity,
@@ -198,7 +198,7 @@
  
  
  template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-           typename VecV = int64_t, int32_t Strategy = -1,
+           typename VecV = int32_t, int32_t Strategy = -1,
            int32_t EVICT_GROUP_SIZE = 16, int32_t COUNT_GROUP_SIZE = 32>
  __simt_vf__ __aicore__
  LAUNCH_BOUND(THREAD_NUM_512) inline void insert_and_evict_kernel_with_digest_vf(

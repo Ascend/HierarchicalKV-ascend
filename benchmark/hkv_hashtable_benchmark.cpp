@@ -321,6 +321,11 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
         NPU_CHECK(aclrtSynchronizeStream(stream));
         break;
       }
+      case API_Select::assign_values: {
+        table->assign_values(key_num_per_op_warmup, d_keys, d_vectors, stream);
+        NPU_CHECK(aclrtSynchronizeStream(stream));
+        break;
+      }
       default: {
         std::cout << "[Unsupport API]\n";
       }
@@ -488,6 +493,13 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
       timer.end();
       break;
     }
+    case API_Select::assign_values: {
+      timer.start();
+      table->assign_values(key_num_per_op, d_keys, d_vectors, stream);
+      NPU_CHECK(aclrtSynchronizeStream(stream));
+      timer.end();
+      break;
+    }
     default: {
       std::cout << "[Unsupport API]\n";
     }
@@ -525,6 +537,7 @@ void print_title_a() {
        << "|   find* "
        << "| export_batch "
        << "| assign_scores "
+       << "| assign_values "
        << "| insert_and_evict ";
   cout << "|\n";
 
@@ -541,6 +554,8 @@ void print_title_a() {
        //<< "| export_batch "
        << "|-------------:"
        //<< "| assign_scores "
+       << "|--------------:"
+       //<< "| assign_values "
        << "|--------------:"
        //<< "| insert_and_evict "
        << "|-----------------:";
@@ -651,6 +666,10 @@ void test_main(std::vector<API_Select>& apis, const size_t dim,
           std::cout << rep(8);
           break;
         }
+        case API_Select::assign_values: {
+          std::cout << rep(8);
+          break;
+        }
         case API_Select::insert_and_evict: {
           std::cout << rep(11);
           break;
@@ -707,6 +726,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::find_ptr,
         API_Select::export_batch,
         API_Select::assign_scores,
+        API_Select::assign_values,
         API_Select::insert_and_evict,
       };
       cout << "### On pure HBM mode: " << endl;

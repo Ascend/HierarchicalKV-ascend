@@ -46,6 +46,7 @@
 #include "../hkv_hashtable/insert_and_evict_kernel/insert_and_evict_kernel.h"
 #include "../hkv_hashtable/traverse_kernel/traverse_kernel.h"
 #include "../hkv_hashtable/remove_kernel/remove_kernel.h"
+#include "../hkv_hashtable/assign_values_kernel/assign_values_kernel.h"
 #include "aclnn_helper.h"
 #include "aclnnop/aclnn_reduce_sum.h"
 #include "bucket_memory_pool_manager.h"
@@ -1574,15 +1575,30 @@ class HashTable : public HashTableBase<K, V, S> {
    * @param unique_key If all keys in the same batch are unique.
    */
   void assign_values(const size_type n,
-                     const key_type* keys,      // (n)
-                     const value_type* values,  // (n, DIM)
-                     aclrtStream stream = 0, bool unique_key = true) {
+    const key_type* keys,      // (n)
+    const value_type* values,  // (n, DIM)
+    aclrtStream stream = 0, bool unique_key = true) {
     if (n == 0) {
       return;
     }
-
-    std::cout << "[Unsupport assign_values yet]\n";
-
+    if (is_fast_mode()) {
+      constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
+      if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
+        uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+        assign_values_kernel<K, V, S><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+        const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
+        n, value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
+        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+      } else {
+        assign_values_kernel_with_io<K, V, S><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
+        const_cast<key_type*>(keys), const_cast<value_type*>(values),
+        n, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      }
+    } else {
+      throw std::runtime_error("[assign_values] Only supported in pure HBM mode.");
+    }
     NpuCheckError();
   }
 

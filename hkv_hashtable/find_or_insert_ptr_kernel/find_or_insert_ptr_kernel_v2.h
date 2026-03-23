@@ -33,7 +33,7 @@
  namespace hkv {
  using namespace AscendC;
  
- template <typename K = uint64_t, typename V = float, typename S = uint64_t, typename VecV = int64_t,
+ template <typename K = uint64_t, typename V = float, typename S = uint64_t, typename VecV = int32_t,
            int Strategy = -1, int32_t EVICT_GROUP_SIZE = 16>
  __simt_vf__ __aicore__
  LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_vf_v2(
