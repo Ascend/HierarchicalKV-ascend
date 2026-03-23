@@ -161,6 +161,47 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void remove_if_kernel_vf(
   }
 }
 
+template <typename K, typename V, typename S, typename PredFunctor,
+          int32_t GROUP_SIZE>
+__simt_vf__ __aicore__
+LAUNCH_BOUND(THREAD_NUM_512) inline void remove_if_v2_kernel_vf(
+    __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
+    uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+    uint32_t thread_all, uint32_t block_index, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
+    PredFunctor pred, __gm__ size_t* count) {
+  for (uint64_t tid = block_index * blockDim.x + threadIdx.x; tid < capacity;
+       tid += thread_all) {
+    uint64_t bkt_idx = tid >> max_bucket_shift;
+    uint64_t key_idx = tid - (bkt_idx << max_bucket_shift);
+
+    __gm__ Bucket<K, V, S>* __restrict__ bucket = buckets + bkt_idx;
+
+    const K key = bucket->keys_[key_idx];
+    __gm__ V* value = bucket->vectors + key_idx * dim;
+    const S score = bucket->scores_[key_idx];
+
+    bool match = false;
+    if (!IS_RESERVED_KEY<K>(key) && pred(key, value, score, GROUP_SIZE)) {
+      match = true;
+      bucket->keys_[key_idx] = static_cast<K>(RECLAIM_KEY);
+      bucket->scores_[key_idx] = EMPTY_SCORE;
+      bucket->digests_[key_idx] = reclaim_digest<K>();
+      if (bucket_max_size < warpSize) {
+        atomicSub(buckets_size + bkt_idx, 1);
+      }
+    }
+    uint32_t vote = asc_ballot(match);
+    int32_t warp_count = AscendC::Simt::Popc(vote);
+    if (threadIdx.x % warpSize == 0) {
+      atomicAdd(count, warp_count);
+      if (bucket_max_size >= warpSize) {
+        atomicSub(buckets_size + bkt_idx, warp_count);
+      }
+    }
+  }
+}
+
 template <class K, class V, class S>
 __global__ __vector__ void remove_kernel(
     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
@@ -189,6 +230,21 @@ __global__ __vector__ void remove_if_kernel(__gm__ Bucket<K, V, S>* buckets,
       dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
       buckets_num, bucket_max_size, pattern, threshold, count, thread_all,
       GetBlockIdx());
+}
+
+template <class K, class V, class S, class PredFunctor, int32_t GROUP_SIZE>
+__global__ __vector__ void remove_if_v2_kernel(
+    __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
+    uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
+    uint64_t capacity_divisor_shift, PredFunctor pred, __gm__ size_t* count) {
+  const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
+
+  asc_vf_call<remove_if_v2_kernel_vf<K, V, S, PredFunctor, GROUP_SIZE>>(
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
+      capacity, bucket_max_size, dim, thread_all, GetBlockIdx(),
+      max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift, pred,
+      count);
 }
 
 }  // namespace hkv

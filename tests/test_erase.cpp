@@ -370,12 +370,15 @@ TEST(TestErase, test_erase_with_insert_and_evict) {
   aclrtFree(d_evicted_counter);
 }
 
-TEST(TestErase, test_erase_if) {
+enum class EraseIfVersion {
+  V1,
+  V2
+};
+
+template <EraseIfVersion EraseType, typename K, typename V, typename S>
+void test_erase_if_basic() {
   // 1. 初始化
   init_env();
-  using K = int64_t;
-  using V = float;
-  using S = uint64_t;
   constexpr size_t dim = DEFAULT_DIM;
   constexpr size_t key_num = 4 * 1024UL;
   constexpr size_t capacity = 128 * 1024UL;
@@ -421,9 +424,15 @@ TEST(TestErase, test_erase_if) {
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   EXPECT_EQ(table->size(device_data.stream), key_num);
 
-  // 7. 调用erase_if接口，使用EraseIfPredFunctor作为模板参数
-  size_t actual_erase_count = table->erase_if<EraseIfPredFunctor>(
-      pattern, threshold, device_data.stream);
+  // 7. 根据模板参数选择使用erase_if还是erase_if_v2
+  size_t actual_erase_count = 0;
+  if constexpr (EraseType == EraseIfVersion::V2) {
+    EraseIfPredFunctorV2<K, V, S> pred(pattern, threshold);
+    actual_erase_count = table->erase_if_v2(pred, device_data.stream);
+  } else {
+    actual_erase_count = table->template erase_if<EraseIfPredFunctor>(
+        pattern, threshold, device_data.stream);
+  }
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 
   // 8. 验证删除数量是否符合预期
@@ -480,4 +489,12 @@ TEST(TestErase, test_erase_if) {
 
   // 10. 释放资源
   table->clear();
+}
+
+TEST(TestErase, test_erase_if) {
+  test_erase_if_basic<EraseIfVersion::V1, int64_t, float, uint64_t>();
+}
+
+TEST(TestErase, test_erase_if_v2) {
+  test_erase_if_basic<EraseIfVersion::V2, int64_t, float, uint64_t>();
 }

@@ -1878,8 +1878,7 @@ class HashTable : public HashTableBase<K, V, S> {
   /**
    * @brief Erase the key-value-score tuples which match @tparam PredFunctor.
    * @param pred A functor with template <K, V, S> defined an operator with
-   * signature:  __device__ (bool*)(const K&, const V*, const S&, const
-   * cg::thread_block_tile<GroupSize>&).
+   * signature:  __device__ (bool*)(const K&, const V*, const S&, int32_t).
    *  @param stream The CANN stream that is used to execute the operation.
    *
    * @return The number of elements removed.
@@ -1887,9 +1886,29 @@ class HashTable : public HashTableBase<K, V, S> {
 
   template <typename PredFunctor>
   size_type erase_if_v2(PredFunctor& pred, aclrtStream stream = 0) {
-    std::cout << "[Unsupport erase_if_v2 yet]\n";
+    auto dev_ws{dev_mem_pool_->get_workspace<1>(sizeof(size_type), stream)};
+    auto d_counter{dev_ws.get<size_type*>(0)};
+
+    NPU_CHECK(aclrtMemsetAsync(d_counter, sizeof(size_type), 0,
+                               sizeof(size_type), stream));
+
+    int32_t cg_size = GetCGSize(options_.dim, table_->capacity);
+    DISPATCH_GROUP_SIZE(
+        cg_size, (remove_if_v2_kernel<K, V, S, PredFunctor, GROUP_SIZE>
+                  <<<block_dim_, 0, stream>>>(
+                      table_->buckets, table_->buckets_size, table_->capacity,
+                      table_->bucket_max_size, options_.dim,
+                      table_->max_bucket_shift, table_->capacity_divisor_magic,
+                      table_->capacity_divisor_shift, pred, d_counter)));
+
+    size_type count = 0;
+    NPU_CHECK(aclrtMemcpyAsync(&count, sizeof(size_type), d_counter,
+                               sizeof(size_type), ACL_MEMCPY_DEVICE_TO_HOST,
+                               stream));
+    NPU_CHECK(aclrtSynchronizeStream(stream));
+
     NpuCheckError();
-    return 0;
+    return count;
   }
 
   /**
@@ -2067,7 +2086,7 @@ class HashTable : public HashTableBase<K, V, S> {
    *
    * @tparam ExecutionFunc A functor type with a template signature `<K, V, S>`.
    * It should define an operator with the signature:
-   * `__device__ void operator()(const K&, V*, S*, int)`.
+   * `__device__ void operator()(const K&, V*, S*, int32_t)`.
    *
    * @param first The first element to which the function object will be
    * applied.
@@ -2075,7 +2094,7 @@ class HashTable : public HashTableBase<K, V, S> {
    * be applied.
    * @param f A functor of type `ExecutionFunc` that defines the predicate for
    * filtering tuples. signature:  __device__ (bool*)(const K&, const V*, const
-   * S&, const cg::tiled_partition<GroupSize>&).
+   * S&, int32_t).
    * @param stream The CANN stream that is used to execute the operation.
    *
    * @return void
