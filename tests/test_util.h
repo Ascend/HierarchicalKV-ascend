@@ -225,6 +225,22 @@ void create_continuous_keys(K* h_keys, S* h_scores, V* h_vectors, int KEY_NUM,
   }
 }
 
+template <class K, class S, class V>
+void create_continuous_keys(size_t dim, K* h_keys, S* h_scores, V* h_vectors,
+                            int KEY_NUM, K start = 1) {
+  for (K i = 0; i < KEY_NUM; i++) {
+    h_keys[i] = start + static_cast<K>(i);
+    if (h_scores != nullptr) {
+      h_scores[i] = h_keys[i];
+    }
+    if (h_vectors != nullptr) {
+      for (size_t j = 0; j < dim; j++) {
+        h_vectors[i * dim + j] = static_cast<V>(h_keys[i] * 0.00001);
+      }
+    }
+  }
+}
+
 template <class K, class S, class V, size_t DIM = 16>
 void create_keys_in_one_buckets(K* h_keys, S* h_scores, V* h_vectors,
                                 int KEY_NUM, int capacity,

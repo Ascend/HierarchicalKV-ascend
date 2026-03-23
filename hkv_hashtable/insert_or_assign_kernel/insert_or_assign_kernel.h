@@ -35,9 +35,9 @@
      __gm__ void* buckets_addr_gm, __gm__ int32_t* buckets_size_addr_gm, uint64_t capacity,
      uint32_t bucket_max_size, uint32_t dim, __gm__ void* keys_addr_gm,
      __gm__ void* values_addr_gm, __gm__ void* scores_gm, S cur_score, uint64_t n,
-     uint32_t thread_all, uint64_t global_epoch, uint32_t block_index,
+     uint64_t global_epoch, uint32_t block_index,
      uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
-     uint64_t capacity_divisor_shift, uint64_t n_align_warp, int32_t group_size) {
+     uint64_t capacity_divisor_shift, uint64_t n_align_warp, int32_t group_size, uint32_t thread_all) {
    if (buckets_addr_gm == nullptr) {
      return;
    }
@@ -582,8 +582,7 @@
      uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
      uint64_t n_align_warp, int32_t group_size) {
  
-   constexpr uint32_t thread_num = 512;
-   const uint32_t thread_all = thread_num * GetBlockNum();
+   const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
    uint64_t cur_score =
        (Strategy == npu::hkv::EvictStrategyInternal::kLru ||
         Strategy == npu::hkv::EvictStrategyInternal::kEpochLru)
@@ -594,11 +593,11 @@
            value_size,
            (Simt::VF_CALL<insert_or_assign_kernel_with_digest_vf<
              K, V, S, DTYPE, Strategy>>(
-           Simt::Dim3{static_cast<uint32_t>(thread_num)}, buckets,
+           Simt::Dim3{THREAD_NUM_512}, buckets,
            buckets_size, capacity, bucket_max_size, dim, keys, values,
-           scores, cur_score, n, thread_all, global_epoch, GetBlockIdx(),
+           scores, cur_score, n, global_epoch, GetBlockIdx(),
            max_bucket_shift, capacity_divisor_magic,
-           capacity_divisor_shift, n_align_warp, group_size)));
+           capacity_divisor_shift, n_align_warp, group_size, thread_all)));
  }
  
  template <class K, class V, class S, int Strategy = -1>
@@ -610,8 +609,7 @@
      uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
      uint64_t n_align_warp, int32_t group_size) {
  
-   constexpr uint32_t thread_num = 1024;
-   const uint32_t thread_all = thread_num * GetBlockNum();
+   const uint32_t thread_all = THREAD_NUM_1024 * GetBlockNum();
    uint64_t cur_score =
        (Strategy == npu::hkv::EvictStrategyInternal::kLru ||
         Strategy == npu::hkv::EvictStrategyInternal::kEpochLru)
@@ -621,7 +619,7 @@
            value_size,
            (Simt::VF_CALL<insert_or_assign_kernel_with_digest_vf_1024<
              K, V, S, DTYPE, Strategy>>(
-           Simt::Dim3{static_cast<uint32_t>(thread_num)}, buckets,
+           Simt::Dim3{THREAD_NUM_1024}, buckets,
            buckets_size, capacity, bucket_max_size, dim, keys, values,
            scores, cur_score, n, thread_all, global_epoch, GetBlockIdx(),
            max_bucket_shift, capacity_divisor_magic,

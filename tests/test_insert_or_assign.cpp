@@ -126,14 +126,15 @@ void test_insert_and_assign_basic() {
   EXPECT_EQ(table->size(device_data.stream), 0);
 }
 
-TEST(test_insert_or_assign, test_insert_and_assign) {
+TEST(TestInsertOrAssign, test_insert_and_assign) {
   test_insert_and_assign_basic<uint64_t, float, uint64_t>();
   test_insert_and_assign_basic<uint64_t, double, uint64_t>();
   test_insert_and_assign_basic<int64_t, uint16_t, uint64_t>();
   test_insert_and_assign_basic<int64_t, uint8_t, uint64_t>();
 }
 
-TEST(test_insert_or_assign, test_n_greater_than_thread_all) {
+void test_n_greater_than_thread_all(size_t dim) {
+  SCOPED_TRACE(::testing::Message() << "dim = " << dim);
   // 1. 初始化
   init_env();
 
@@ -151,18 +152,18 @@ TEST(test_insert_or_assign, test_n_greater_than_thread_all) {
 
   // 2. 申请device内存
   DeviceData<K, V, S> device_data;
-  device_data.malloc(key_num);
+  device_data.malloc(key_num, dim);
 
   // 3. 创建数据
   vector<K> host_keys(key_num, 0);
-  vector<V> host_values(key_num * DEFAULT_DIM, 0);
-  create_continuous_keys<K, S, V, DEFAULT_DIM>(
-      host_keys.data(), nullptr, host_values.data(), key_num, key_num - 100);
+  vector<V> host_values(key_num * dim, 0);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num, key_num - 100);
   device_data.copy_keys(host_keys, key_num);
-  device_data.copy_values(host_values, key_num);
+  device_data.copy_values(host_values, key_num, dim);
 
   // 4. 建表
-  auto table = get_default_table<K, V, S>();
+  auto table = get_table<K, V, S>(dim, DEFAULT_CAPACITY, 1);
   EXPECT_EQ(table->size(), 0);
 
   // 5. 插入大量key，保证算子内部线程触发多次循环
@@ -177,18 +178,18 @@ TEST(test_insert_or_assign, test_n_greater_than_thread_all) {
               device_data.device_found, nullptr, device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 
-  check_result(host_values, key_num, device_data);
+  check_result(host_values, key_num, device_data, key_num, dim);
   table->clear();
 
   uint64_t valid_num = 100;
   // 7. 设置第一次循环key为无效值
-  create_continuous_keys<K, S, V, DEFAULT_DIM>(
-      host_keys.data(), nullptr, host_values.data(), key_num, key_num * 2);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num, key_num * 2);
   for (size_t i = 0; i < key_num - valid_num; i++) {
     host_keys[i] = DEFAULT_RESERVED_KEY_MASK;
   }
   device_data.copy_keys(host_keys, key_num);
-  device_data.copy_values(host_values, key_num);
+  device_data.copy_values(host_values, key_num, dim);
 
   table->insert_or_assign(key_num, device_data.device_keys,
                           device_data.device_values, nullptr,
@@ -201,12 +202,17 @@ TEST(test_insert_or_assign, test_n_greater_than_thread_all) {
               device_data.device_found, nullptr, device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 
-  check_result(host_values, key_num, device_data, valid_num);
+  check_result(host_values, key_num, device_data, valid_num, dim);
 
   table->clear();
 }
 
-TEST(test_insert_or_assign, test_loader_factor_to_1) {
+TEST(TestInsertOrAssign, test_n_greater_than_thread_all) {
+  test_n_greater_than_thread_all(DEFAULT_DIM);
+  test_n_greater_than_thread_all(1024);
+}
+
+TEST(TestInsertOrAssign, test_loader_factor_to_1) {
   // 1. 初始化
   init_env();
   using K = int64_t;
@@ -266,7 +272,7 @@ TEST(test_insert_or_assign, test_loader_factor_to_1) {
   EXPECT_EQ(insert_time, expect_insert_time);
 }
 
-TEST(test_insert_or_assign, test_evict) {
+TEST(TestInsertOrAssign, test_evict) {
   // 1. 初始化
   init_env();
   using K = int64_t;
@@ -304,7 +310,7 @@ TEST(test_insert_or_assign, test_evict) {
   check_result(host_values, key_num, device_data, capacity);
 }
 
-TEST(test_insert_or_assign, test_dim) {
+TEST(TestInsertOrAssign, test_dim) {
   // 1. 初始化
   init_env();
   using K = int64_t;
@@ -343,7 +349,7 @@ TEST(test_insert_or_assign, test_dim) {
   check_result(host_values, key_num, device_data, capacity, dim);
 }
 
-TEST(test_insert_or_assign, test_little_demo_benchmark) {
+TEST(TestInsertOrAssign, test_little_demo_benchmark) {
   // 1. 初始化
   init_env();
   using K = int64_t;
