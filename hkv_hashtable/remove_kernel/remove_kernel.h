@@ -22,6 +22,7 @@
 #include "../../include/types.h"
 #include "../../include/utils.h"
 #include "kernel_operator.h"
+#include "simt_api/device_warp_functions.h"
 
 namespace npu {
 namespace hkv {
@@ -111,6 +112,55 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void remove_kernel_vf(
   }
 }
 
+template <typename K, typename V, typename S,
+          template <typename, typename> class PredFunctor>
+__simt_vf__ __aicore__
+LAUNCH_BOUND(THREAD_NUM_512) inline void remove_if_kernel_vf(
+    __gm__ Bucket<K, V, S>* __restrict__ buckets, __gm__ int32_t* buckets_size,
+    uint64_t buckets_num, uint32_t bucket_max_size, const K pattern,
+    const S threshold, __gm__ size_t* count, uint32_t thread_all,
+    uint32_t block_index) {
+  PredFunctor<K, S> pred;
+
+  K key = 0;
+  S score = 0;
+  __gm__ K* bucket_keys = nullptr;
+  __gm__ D* bucket_digests = nullptr;
+  __gm__ S* bucket_scores = nullptr;
+  __gm__ Bucket<K, V, S>* bucket = nullptr;
+  uint32_t bucket_erase_count = 0;
+  uint32_t thread_erase_count = 0;
+  for (uint64_t bucket_idx = block_index * blockDim.x + threadIdx.x;
+       bucket_idx < buckets_num; bucket_idx += thread_all) {
+    // 每个线程处理一个桶
+    bucket = buckets + bucket_idx;
+    bucket_keys = bucket->keys_;
+    bucket_digests = bucket->digests_;
+    bucket_scores = bucket->scores_;
+    bucket_erase_count = 0;
+    for (uint32_t pos_cur = 0; pos_cur < bucket_max_size; pos_cur++) {
+      key = bucket_keys[pos_cur];
+      if (IS_RESERVED_KEY<K>(key)) {
+        continue;
+      }
+      score = bucket_scores[pos_cur];
+      if (pred(key, score, pattern, threshold)) {
+        bucket_erase_count++;
+        bucket_keys[pos_cur] = static_cast<K>(RECLAIM_KEY);
+        bucket_scores[pos_cur] = EMPTY_SCORE;
+        bucket_digests[pos_cur] = reclaim_digest<K>();
+      }
+    }
+    thread_erase_count = thread_erase_count + bucket_erase_count;
+    buckets_size[bucket_idx] = buckets_size[bucket_idx] - bucket_erase_count;
+  }
+  // asc_reduce_add不支持uint64_t的累加，只能使用uint32_t，但考虑到32个线程累加桶内key数超过uint32_max也不可能
+  uint32_t warp_erase_count = asc_reduce_add(thread_erase_count);
+  if (threadIdx.x % warpSize == 0) {
+    atomicAdd(count, warp_erase_count);
+  }
+}
+
 template <class K, class V, class S>
 __global__ __vector__ void remove_kernel(
     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
@@ -123,6 +173,22 @@ __global__ __vector__ void remove_kernel(
       Simt::Dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
       capacity, bucket_max_size, dim, keys, n, thread_all, GetBlockIdx(),
       max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift);
+}
+
+template <class K, class V, class S,
+          template <typename, typename> class PredFunctor>
+__global__ __vector__ void remove_if_kernel(__gm__ Bucket<K, V, S>* buckets,
+                                            __gm__ int32_t* buckets_size,
+                                            uint64_t buckets_num,
+                                            uint32_t bucket_max_size,
+                                            const K pattern, const S threshold,
+                                            __gm__ size_t* count) {
+  const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
+
+  asc_vf_call<remove_if_kernel_vf<K, V, S, PredFunctor>>(
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
+      buckets_num, bucket_max_size, pattern, threshold, count, thread_all,
+      GetBlockIdx());
 }
 
 }  // namespace hkv

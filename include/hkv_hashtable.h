@@ -1822,9 +1822,24 @@ class HashTable : public HashTableBase<K, V, S> {
   template <template <typename, typename> class PredFunctor>
   size_type erase_if(const key_type& pattern, const score_type& threshold,
                      aclrtStream stream = 0) {
-    std::cout << "[Unsupport erase_if yet]\n";
+    auto dev_ws{dev_mem_pool_->get_workspace<1>(sizeof(size_type), stream)};
+    auto d_counter{dev_ws.get<size_type*>(0)};
+
+    NPU_CHECK(aclrtMemsetAsync(d_counter, sizeof(size_type), 0,
+                               sizeof(size_type), stream));
+
+    remove_if_kernel<K, V, S, PredFunctor><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->buckets_size, table_->buckets_num,
+        options_.max_bucket_size, pattern, threshold, d_counter);
+
+    size_type count = 0;
+    NPU_CHECK(aclrtMemcpyAsync(&count, sizeof(size_type), d_counter,
+                               sizeof(size_type), ACL_MEMCPY_DEVICE_TO_HOST,
+                               stream));
+    NPU_CHECK(aclrtSynchronizeStream(stream));
+
     NpuCheckError();
-    return 0;
+    return count;
   }
 
   /**

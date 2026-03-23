@@ -19,6 +19,7 @@
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
 #include "test_device_data.h"
+#include "test_template_func.h"
 #include "test_util.h"
 #include "types.h"
 
@@ -367,4 +368,116 @@ TEST(TestErase, test_erase_with_insert_and_evict) {
   }
   aclrtFree(host_found);
   aclrtFree(d_evicted_counter);
+}
+
+TEST(TestErase, test_erase_if) {
+  // 1. 初始化
+  init_env();
+  using K = int64_t;
+  using V = float;
+  using S = uint64_t;
+  constexpr size_t dim = DEFAULT_DIM;
+  constexpr size_t key_num = 4 * 1024UL;
+  constexpr size_t capacity = 128 * 1024UL;
+
+  // 2. 创建表
+  auto table = get_table<K, V, S, EvictStrategy::kCustomized>(dim, capacity, 1);
+  EXPECT_EQ(table->size(), 0);
+
+  // 3. 申请hbm内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num);
+
+  // 4. 创建数据并插入
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  vector<S> host_scores(key_num, 0);
+
+  // 生成连续的key和scores，其中scores部分大于阈值
+  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(),
+                                       host_values.data(), key_num);
+
+  // 5. 设置测试参数
+  constexpr K pattern = 100;
+  constexpr S threshold = 0;
+
+  // 计算预期删除的数量
+  size_t expected_erase_count = 0;
+  for (size_t i = 0; i < key_num; ++i) {
+    if (((host_keys[i] & 0x7f) > pattern) && (host_scores[i] > threshold)) {
+      expected_erase_count++;
+    }
+  }
+  ASSERT_NE(expected_erase_count, 0);
+
+  // 6. 将数据复制到设备并插入
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num);
+  device_data.copy_scores(host_scores, key_num);
+
+  table->insert_or_assign(key_num, device_data.device_keys,
+                          device_data.device_values, device_data.device_scores,
+                          device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table->size(device_data.stream), key_num);
+
+  // 7. 调用erase_if接口，使用EraseIfPredFunctor作为模板参数
+  size_t actual_erase_count = table->erase_if<EraseIfPredFunctor>(
+      pattern, threshold, device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+
+  // 8. 验证删除数量是否符合预期
+  EXPECT_EQ(actual_erase_count, expected_erase_count);
+  EXPECT_EQ(table->size(device_data.stream), key_num - expected_erase_count);
+
+  // 9. 验证剩余元素是否符合预期
+  // 找到应该保留的元素
+  vector<K> remaining_keys;
+  for (size_t i = 0; i < key_num; ++i) {
+    if (!(((host_keys[i] & 0x7f) > pattern) && (host_scores[i] > threshold))) {
+      remaining_keys.push_back(host_keys[i]);
+    }
+  }
+  ASSERT_TRUE(!remaining_keys.empty());
+
+  // 检查这些元素是否仍然存在于表中
+  // 创建临时DeviceData用于存储剩余的keys和find结果
+  DeviceData<K, V, S> temp_device_data;
+  temp_device_data.malloc(remaining_keys.size());
+
+  // 分配普通bool指针内存
+  bool* host_found = nullptr;
+  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                            remaining_keys.size() * sizeof(bool)),
+            ACL_ERROR_NONE);
+
+  // 复制剩余的key到设备
+  temp_device_data.copy_keys(remaining_keys, remaining_keys.size());
+
+  // 调用find接口检查元素是否存在，第三个参数传递正确的values_ptr指针（即使不使用）
+  table->find(remaining_keys.size(), temp_device_data.device_keys,
+              temp_device_data.device_values_ptr, temp_device_data.device_found,
+              nullptr, temp_device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(temp_device_data.stream), ACL_ERROR_NONE);
+
+  // 复制结果回主机
+  ASSERT_EQ(aclrtMemcpy(host_found, remaining_keys.size() * sizeof(bool),
+                        temp_device_data.device_found,
+                        remaining_keys.size() * sizeof(bool),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+
+  // 验证所有应该保留的元素都存在
+  for (size_t i = 0; i < remaining_keys.size(); ++i) {
+    EXPECT_TRUE(host_found[i])
+        << "Key " << remaining_keys[i]
+        << " should remain in the table but was not found!";
+  }
+
+  // 释放内存
+  ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+  host_found = nullptr;
+
+  // 10. 释放资源
+  table->clear();
 }

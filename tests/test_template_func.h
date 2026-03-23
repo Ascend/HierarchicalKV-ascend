@@ -50,3 +50,12 @@ struct ForEachScoresFilterFunc {
     }
   }
 };
+
+template <class K, class S>
+struct EraseIfPredFunctor {
+  __forceinline__ __device__ bool operator()(const K& key, S& score,
+                                             const K& pattern,
+                                             const S& threshold) {
+    return (((key & 0x7f) > pattern) && (score > threshold));
+  }
+};
