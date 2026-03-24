@@ -32,6 +32,7 @@
 #include <string>
 #include <type_traits>
 #include "../hkv_hashtable/dump_kernel/dump_kernel.h"
+#include "../hkv_hashtable/dump_kernel/dump_kernel_if_v2.h"
 #include "../hkv_hashtable/rehash_kernel/rehash_kernel.h"
 #include "../hkv_hashtable/clear_kernel/clear_kernel.h"
 #include "../hkv_hashtable/find_and_update_kernel/find_and_update_kernel_with_filter.h"
@@ -2065,8 +2066,7 @@ class HashTable : public HashTableBase<K, V, S> {
    *
    * @tparam PredFunctor A functor type with a template signature `<K, V, S>`.
    * It should define an operator with the signature:
-   * `__device__ bool operator()(const K&, const V*, const S&,
-   * cg::thread_block_tile<GroupSize>&)`.
+   * `__device__ bool operator()(const K&, const V*, const S&)`.
    *
    * @param pred A functor of type `PredFunctor` that defines the predicate for
    * filtering tuples.
@@ -2094,8 +2094,18 @@ class HashTable : public HashTableBase<K, V, S> {
                           value_type* values,            // (n, DIM)
                           score_type* scores = nullptr,  // (n)
                           aclrtStream stream = 0) const {
-    std::cout << "[Unsupport export_batch_if_v2 yet]\n";
-
+    NPU_CHECK(aclrtMemsetAsync(d_counter, sizeof(size_type), 0, sizeof(size_type), stream));
+    n = std::min(table_->capacity - offset, n);
+    if ((offset >= table_->capacity) || (n == 0)) {
+      return;
+    }
+    size_type n_align = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    DISPATCH_GROUP_SIZE(
+        value_move_opt_.cg_size,
+        (dump_kernel_if_v2<K, V, S, PredFunctor, GROUP_SIZE>
+         <<<block_dim_, 64 * 1024, stream>>>(
+             pred, d_table_, table_->buckets, keys, values, scores, offset, n,
+             n_align, d_counter, value_move_opt_.size, value_move_opt_.dim)));
     NpuCheckError();
   }
 
