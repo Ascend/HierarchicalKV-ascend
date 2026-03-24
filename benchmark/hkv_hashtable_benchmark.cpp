@@ -540,7 +540,8 @@ void print_title_a() {
        << "| assign "
        << "| assign_scores "
        << "| assign_values "
-       << "| insert_and_evict ";
+       << "| insert_and_evict "
+       << "|  contains ";
   cout << "|\n";
 
   //<< "| load_factor "
@@ -564,7 +565,9 @@ void print_title_a() {
        //<< "| assign_values "
        << "|--------------:"
        //<< "| insert_and_evict "
-       << "|-----------------:";
+       << "|-----------------:"
+       //<< "|  contains "
+       << "|----------:";
   cout << "|\n";
 }
 
@@ -688,6 +691,10 @@ void test_main(std::vector<API_Select>& apis, const size_t dim,
           std::cout << rep(11);
           break;
         }
+        case API_Select::contains: {
+          std::cout << rep(4);
+          break;
+        }
         default: {
           std::cout << "[Unsupport API]";
         }
@@ -744,6 +751,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::assign_scores,
         API_Select::assign_values,
         API_Select::insert_and_evict,
+        API_Select::contains,
       };
       cout << "### On pure HBM mode: " << endl;
       print_configuration(8, 128 * 1024 * 1024UL, 4);

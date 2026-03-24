@@ -39,6 +39,7 @@
 #include "../hkv_hashtable/find_ptr_kernel/find_ptr_with_digest_kernel.h"
 #include "../hkv_hashtable/find_ptr_kernel/find_ptr_kernel.h"
 #include "../hkv_hashtable/find_kernel/find_with_digest_kernel.h"
+#include "../hkv_hashtable/contains_kernel/contains_kernel.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel_with_filter.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel.h"
 #include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
@@ -1808,7 +1809,11 @@ class HashTable : public HashTableBase<K, V, S> {
       return;
     }
 
-    std::cout << "[Unsupport contains yet]\n";
+    contains_kernel<K, V, S><<<block_dim_, 0, stream>>>(
+      table_->buckets, table_->capacity,
+      static_cast<uint32_t>(table_->bucket_max_size),
+      const_cast<key_type*>(keys), founds, n, table_->max_bucket_shift,
+      table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     NpuCheckError();
   }
 
