@@ -40,6 +40,7 @@
 #include "../hkv_hashtable/find_ptr_kernel/find_ptr_with_digest_kernel.h"
 #include "../hkv_hashtable/find_ptr_kernel/find_ptr_kernel.h"
 #include "../hkv_hashtable/find_kernel/find_with_digest_kernel.h"
+#include "../hkv_hashtable/find_kernel/find_miss_with_digest_kernel.h"
 #include "../hkv_hashtable/contains_kernel/contains_kernel.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel_with_filter.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel.h"
@@ -1698,10 +1699,25 @@ class HashTable : public HashTableBase<K, V, S> {
     if (n == 0) {
       return;
     }
+    NPU_CHECK(aclrtMemsetAsync(missed_size, sizeof(int), 0, sizeof(int), stream));
 
-    std::cout << "[Unsupport find yet]\n";
+    uint64_t n_align_warp =
+        ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    if (is_fast_mode()) {
+      find_miss_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity,
+          static_cast<uint32_t>(options_.max_bucket_size), value_move_opt_.dim,
+          const_cast<key_type*>(keys), values, scores, missed_keys,
+          missed_indices, missed_size, n, value_move_opt_.size,
+          table_->max_bucket_shift, table_->capacity_divisor_magic,
+          table_->capacity_divisor_shift, n_align_warp,
+          static_cast<int32_t>(value_move_opt_.cg_size));
+      NpuCheckError();
+    } else {
+      std::cout << "[Unsupport find yet]\n";
 
-    NpuCheckError();
+      NpuCheckError();
+    }
   }
 
   /**

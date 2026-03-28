@@ -24,8 +24,9 @@ add_compile_options(-std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0)
 
 set_source_files_properties(
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
-    PROPERTIES LANGUAGE ASC
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
+  PROPERTIES LANGUAGE ASC
 )
 
 add_executable(hkv_demo ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
@@ -82,6 +83,34 @@ target_link_libraries(hkv_benchmark PRIVATE
   nnopbase
 )
 
+add_executable(hkv_benchmark_find_miss
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
+)
+
+target_compile_definitions(hkv_benchmark_find_miss PRIVATE
+  SOC_VERSION=${SOC_VERSION}
+)
+
+target_compile_options(hkv_benchmark_find_miss PRIVATE
+  $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+  -g -O2
+  -mllvm -disable-machine-licm
+  --cce-res-usage
+)
+
+target_link_libraries(hkv_benchmark_find_miss PRIVATE
+  m
+  graph_base
+  tiling_api
+  register
+  platform
+  ascendalog
+  dl
+  hkv_includes
+  opapi
+  nnopbase
+)
+
 if(ENABLE_TEST STREQUAL 1)
   enable_testing()
   set(INSTALL_GTEST OFF CACHE BOOL "Disable installation of GTest" FORCE)
@@ -98,7 +127,7 @@ install(TARGETS hkv_demo
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(TARGETS hkv_benchmark
+install(TARGETS hkv_benchmark hkv_benchmark_find_miss
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

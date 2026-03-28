@@ -560,9 +560,9 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
   NPU_CHECK(aclrtSynchronizeDevice());
   NpuCheckError();
 
-  float througput =
+  float throughput =
       key_num_per_op / timer.getResult() / (1024 * 1024 * 1024.0f);
-  return througput;
+  return throughput;
 }
 
 void print_title_a() {
