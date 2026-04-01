@@ -167,8 +167,6 @@ void run_large_scale_export_test(const ExportTestConfig& config) {
 
   if (config.test_empty_table) {
     ASSERT_EQ(export_count, 0);
-//   } else if (config.offset == 0) {
-//     ASSERT_EQ(export_count, config.key_num);
   } else {
     ASSERT_LE(export_count, config.key_num);
     ASSERT_GE(export_count, 0);
