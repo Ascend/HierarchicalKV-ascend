@@ -52,6 +52,7 @@
 #include "../hkv_hashtable/remove_kernel/remove_kernel.h"
 #include "../hkv_hashtable/assign_values_kernel/assign_values_kernel.h"
 #include "../hkv_hashtable/assign_kernel/assign_kernel.h"
+#include "../hkv_hashtable/accum_or_assign_kernel/accum_or_assign_kernel.h"
 #include "aclnn_helper.h"
 #include "aclnnop/aclnn_reduce_sum.h"
 #include "bucket_memory_pool_manager.h"
@@ -1319,12 +1320,37 @@ class HashTable : public HashTableBase<K, V, S> {
                        const score_type* scores = nullptr,  // (n)
                        aclrtStream stream = 0,
                        bool ignore_evict_strategy = false) {
-    if (n == 0) {
-      return;
-    }
+    if constexpr (std::is_same<value_type, double>::value) {
+      throw std::runtime_error("[accum_or_assign] Does not support double value_type.");
+    } else {
+      if (n == 0) {
+        return;
+      }
 
-    std::cout << "[Unsupport accum_or_assign yet]\n";
-    NpuCheckError();
+      while (!reach_max_capacity_ &&
+             fast_load_factor(n, stream) > options_.max_load_factor) {
+        reserve(capacity() * 2, stream);
+      }
+
+      if (!ignore_evict_strategy) {
+        check_evict_strategy(scores);
+      }
+
+      if (is_fast_mode()) {
+        accum_or_assign_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+            table_->buckets, table_->buckets_size,
+            table_->capacity, table_->bucket_max_size, options_.dim,
+            keys, value_or_deltas,
+            accum_or_assigns, scores,
+            n, global_epoch_,
+            table_->max_bucket_shift, table_->capacity_divisor_magic,
+            table_->capacity_divisor_shift);
+      } else {
+        throw std::runtime_error("[accum_or_assign] Does not support non-fast mode.");
+      }
+
+      NpuCheckError();
+    }
   }
 
   /**

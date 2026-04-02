@@ -87,5 +87,155 @@ __forceinline__ __device__ OccupyResult find_without_lock(
   return OccupyResult::CONTINUE;
 }
 
+/*
+ * find_and_lock: TILE_SIZE threads cooperate to find/lock a position in bucket. Only support TILE_SIZE = 32.
+ * Combines find-key, find-empty, and eviction into one unified interface.
+ * After return, key_pos holds the locked position and evicted_key holds the
+ * original key at that position (meaningful for EVICT).
+ */
+template <typename K, typename S, int32_t TILE_SIZE = 32>
+__forceinline__ __device__ OccupyResult find_and_lock(
+    __gm__ K* bucket_keys, __gm__ S* bucket_scores,
+    const uint32_t bucket_max_size, const K& key, const S& score,
+    uint32_t& key_pos, K& evicted_key, const uint32_t lane_id) {
+
+  const uint32_t start_pos = key_pos;
+
+  // Phase 1: Find existing key or empty slot
+  for (uint32_t tile_offset = 0; tile_offset < bucket_max_size;
+       tile_offset += TILE_SIZE) {
+    uint32_t current_pos =
+        (start_pos + tile_offset + lane_id) % bucket_max_size;
+
+    // Step 1: 每个线程同时对自己的位置 CAS(key → LOCKED_KEY)
+    K expected_key;
+    uint32_t vote;
+    do {
+      expected_key = asc_atomic_cas(
+          bucket_keys + current_pos, key, static_cast<K>(LOCKED_KEY));
+      bool locked = (expected_key == key);
+
+      vote = asc_ballot(locked);
+      if (vote) {
+        int32_t src_lane = __ffs(static_cast<int32_t>(vote)) - 1;
+        key_pos = asc_shfl(current_pos, src_lane, TILE_SIZE);
+        return OccupyResult::DUPLICATE;
+      }
+
+      vote = asc_ballot(
+          expected_key == static_cast<K>(LOCKED_KEY));
+      if (vote) {
+        continue;
+      }
+      vote = asc_ballot(
+          expected_key == static_cast<K>(EMPTY_KEY));
+      if (vote) {
+        break;
+      }
+    } while (vote != 0);
+
+    // Step 2: 逐个尝试抢占空位
+    while (vote) {
+      int32_t src_lane = __ffs(static_cast<int32_t>(vote)) - 1;
+      K cas_expected = static_cast<K>(EMPTY_KEY);
+      if (static_cast<int32_t>(lane_id) == src_lane) {
+        cas_expected = asc_atomic_cas(
+            bucket_keys + current_pos,
+            static_cast<K>(EMPTY_KEY),
+            static_cast<K>(LOCKED_KEY));
+      }
+      cas_expected = asc_shfl(cas_expected, src_lane, TILE_SIZE);
+      if (cas_expected == static_cast<K>(EMPTY_KEY)) {
+        key_pos = asc_shfl(current_pos, src_lane, TILE_SIZE);
+        return OccupyResult::OCCUPIED_EMPTY;
+      }
+      if (cas_expected == key ||
+          cas_expected == static_cast<K>(LOCKED_KEY)) {
+        return OccupyResult::CONTINUE;
+      }
+      vote -= (static_cast<uint32_t>(1) << src_lane);
+    }
+  }
+
+  // Phase 2: Eviction (bucket full, key not found)
+  S local_min_score = static_cast<S>(MAX_SCORE);
+  uint32_t local_min_pos = 0;
+  K local_min_key = static_cast<K>(EMPTY_KEY);
+
+  // 2.1 遍历桶找最低分，先读 score，仅在更小时才自旋读 key
+  for (uint32_t tile_offset = 0; tile_offset < bucket_max_size;
+       tile_offset += TILE_SIZE) {
+    uint32_t current_pos =
+        (start_pos + tile_offset + lane_id) % bucket_max_size;
+
+    S temp_score =
+        __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+              L1CacheType::NON_CACHEABLE>(bucket_scores + current_pos);
+    if (temp_score < local_min_score) {
+      K current_key;
+      while ((current_key =
+                  __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                        L1CacheType::NON_CACHEABLE>(
+                      bucket_keys + current_pos)) ==
+             static_cast<K>(LOCKED_KEY)) {
+        asc_threadfence();
+      }
+      if (current_key != static_cast<K>(EMPTY_KEY)) {
+        local_min_key = current_key;
+        local_min_score = temp_score;
+        local_min_pos = current_pos;
+      }
+    }
+  }
+
+  // 2.2 归约获得全局最小 score
+  S global_min_score = local_min_score;
+  for (int32_t off = TILE_SIZE / 2; off > 0; off /= 2) {
+    S other_score = asc_shfl_xor(global_min_score, off, TILE_SIZE);
+    if (other_score < global_min_score) {
+      global_min_score = other_score;
+    }
+  }
+
+  // 2.3 分数不足，无法准入
+  if (score < global_min_score) {
+    return OccupyResult::REFUSED;
+  }
+
+  // 2.4 找到持有最低分的 lane，由该 lane 尝试 CAS 抢占
+  uint32_t vote = asc_ballot(local_min_score <= global_min_score);
+  if (vote) {
+    int32_t src_lane = __ffs(static_cast<int32_t>(vote)) - 1;
+    bool result = false;
+    if (static_cast<int32_t>(lane_id) == src_lane) {
+      evicted_key = local_min_key;
+      auto try_key = asc_atomic_cas(bucket_keys + local_min_pos,
+                                     local_min_key,
+                                     static_cast<K>(LOCKED_KEY));
+      if (try_key == local_min_key) {
+        if (__ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                  L1CacheType::NON_CACHEABLE>(
+                bucket_scores + local_min_pos) <= global_min_score) {
+          key_pos = local_min_pos;
+          result = true;
+        } else {
+          (void)asc_atomic_exch(
+              bucket_keys + local_min_pos, local_min_key);
+        }
+      }
+    }
+    result = static_cast<bool>(
+        asc_shfl(static_cast<int32_t>(result), src_lane, TILE_SIZE));
+    if (result) {
+      key_pos = asc_shfl(key_pos, src_lane, TILE_SIZE);
+      evicted_key = asc_shfl(evicted_key, src_lane, TILE_SIZE);
+      return (evicted_key == static_cast<K>(RECLAIM_KEY))
+                 ? OccupyResult::OCCUPIED_RECLAIMED
+                 : OccupyResult::EVICT;
+    }
+  }
+
+  return OccupyResult::CONTINUE;
+}
 }  // namespace hkv
 }  // namespace npu
