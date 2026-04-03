@@ -40,6 +40,15 @@ struct ExportTestConfig {
   FunctorVersion functor_version;  // 导出函数版本
 };
 
+template <class K, class S>
+struct ExportIfPredFunctor {
+  __forceinline__ __device__ bool operator()(const K& key, const S& score,
+                                             const K& pattern,
+                                             const S& threshold) {
+    return score >= threshold;
+  }
+};
+
 template <class K, class V, class S>
 struct ExportIfPredFunctorV2 {
   K pattern;
@@ -175,7 +184,12 @@ void run_export_batch_if_v2_test(const ExportTestConfig& config) {
         pred, scan_len, config.offset, device_export_count,
         device_export_keys, device_export_values,
         config.use_scores ? device_export_scores : nullptr, stream);
-  }
+  } else if (config.functor_version == FunctorVersion::V1) {
+    table.template export_batch_if<ExportIfPredFunctor>(
+        pattern, threshold, scan_len, config.offset, device_export_count,
+        device_export_keys, device_export_values,
+        config.use_scores ? device_export_scores : nullptr, stream);
+    }
   
   ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
   ASSERT_EQ(aclrtMemcpy(&export_count, sizeof(size_t), device_export_count,
@@ -260,5 +274,17 @@ TEST(test_export_batch_if_v2, test_export_batch_if_v2_offset) {
   ExportTestConfig config = {1024, false, 1000, false, FunctorVersion::V2};
   RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   config.offset = 5000;
+  RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
+}
+
+TEST(test_export_batch_if, test_export_batch_if_basic) {
+  ExportTestConfig config = {1024, false, 0, false, FunctorVersion::V1};
+  RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
+  RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
+}
+
+TEST(test_export_batch_if, test_export_batch_if_full_key_num) {
+  ExportTestConfig config = {128 * 1024, false, 0, false, FunctorVersion::V1};
+  RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
 }
