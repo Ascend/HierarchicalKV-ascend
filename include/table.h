@@ -173,27 +173,23 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
                        slice_real_size);
       (*table)->remaining_hbm_for_vectors -= slice_real_size;
     } else {
-      HKV_CHECK(false,
-                "Unsupport using host memory yet, please set "
-                "max_hbm_for_vectors to a sufficiently large value.");
       (*table)->is_pure_hbm = false;
+      const size_t host_min_size = MB(2);
+      slice_real_size = std::max(host_min_size, slice_real_size);
       allocator->alloc(MemoryType::Pinned, (void**)&((*table)->slices[i]),
                        slice_real_size);
+      // 申请的host内存地址和映射后的地址相同，因此使用host地址即可
+      void* stub_ptr = nullptr;
+      NPU_CHECK(aclrtHostRegister(static_cast<void*>((*table)->slices[i]),
+                                  slice_real_size, ACL_HOST_REGISTER_MAPPED,
+                                  &stub_ptr));
     }
     for (size_t j = 0; j < num_of_buckets_in_one_slice; j++) {
-      if ((*table)->is_pure_hbm || mixed_hbm) {
-        size_t index = start + num_of_allocated_buckets + j;
-        __gm__ V* address =
+      size_t index = start + num_of_allocated_buckets + j;
+      __gm__ V* address =
           (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
-        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets, index, address);
-      } else {
-        V* h_ptr =
-            (*table)->slices[i] + j * (*table)->bucket_max_size * (*table)->dim;
-        __gm__ V* address = nullptr;
-        NPU_CHECK(aclrtHostRegister(h_ptr, slice_real_size, ACL_HOST_REGISTER_MAPPED, (void**)&address));
-        size_t index = start + num_of_allocated_buckets + j;
-        allocate_bucket_vectors_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets, index, address);
-      }
+      allocate_bucket_vectors_kernel<K, V, S>
+          <<<1, 0, 0>>>((*table)->buckets, index, address);
     }
     NPU_CHECK(aclrtSynchronizeDevice());
     num_of_allocated_buckets += num_of_buckets_in_one_slice;
@@ -278,7 +274,9 @@ size_t get_slice_size(Table<K, V, S>** table) {
     slice_size = min_slice_size;
   }
 
-  return std::max(min_slice_size, slice_size);
+  // host register限制约束最小为2M，因此统一使用最小2M对齐
+  const size_t host_align_size = MB(2);
+  return std::max(std::max(min_slice_size, slice_size), host_align_size);
 }
 
 /* Initialize a Table struct.
@@ -355,6 +353,7 @@ void destroy_table(Table<K, V, S>** table, BaseAllocator* allocator,
     if (is_on_device((*table)->slices[i])) {
       allocator->free(MemoryType::Device, (*table)->slices[i]);
     } else {
+      NPU_CHECK(aclrtHostUnregister((*table)->slices[i]));
       allocator->free(MemoryType::Pinned, (*table)->slices[i]);
     }
   }

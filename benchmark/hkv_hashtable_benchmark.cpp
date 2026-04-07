@@ -565,6 +565,8 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
   return throughput;
 }
 
+static Test_Mode test_mode = Test_Mode::pure_hbm;
+
 void print_title_a() {
   cout << endl
        << "|    \u03BB "
@@ -576,9 +578,11 @@ void print_title_a() {
        << "| export_batch "
        << "| assign "
        << "| assign_scores "
-       << "| assign_values "
-       << "| insert_and_evict "
-       << "|  contains ";
+       << "| assign_values ";
+  if (test_mode == Test_Mode::pure_hbm) {
+    cout << "| insert_and_evict ";
+  }
+  cout << "|  contains ";
   cout << "|\n";
 
   //<< "| load_factor "
@@ -600,11 +604,13 @@ void print_title_a() {
        //<< "| assign_scores "
        << "|--------------:"
        //<< "| assign_values "
-       << "|--------------:"
-       //<< "| insert_and_evict "
-       << "|-----------------:"
+       << "|--------------:";
+  if (test_mode == Test_Mode::pure_hbm) {
+    //<< "| insert_and_evict "
+    cout << "|-----------------:";
+  }
        //<< "|  contains "
-       << "|----------:";
+  cout << "|----------:";
   cout << "|\n";
 }
 
@@ -801,6 +807,8 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::export_batch_if_v2,
         API_Select::export_batch_if,
       };
+      test_mode = Test_Mode::pure_hbm;
+
       cout << "### On pure HBM mode: " << endl;
       print_configuration(8, 128 * 1024 * 1024UL, 4);
       print_title_a();
@@ -844,6 +852,23 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
       print_title_b();
       test_main(apis_b, 1024, 4 * 1024 * 1024UL, key_num_per_op, 16);
 
+      cout << endl;
+    }
+
+    {
+      std::vector<API_Select> apis_a{
+        API_Select::insert_or_assign,
+      };
+      
+      cout << "### On HBM+HMEM hybrid mode: " << endl;
+      test_mode = Test_Mode::hybrid;
+      print_configuration(64, 128 * 1024 * 1024UL, 16);
+      print_title_a();
+      test_main(apis_a, 64, 128 * 1024 * 1024UL, key_num_per_op, 16);
+
+      print_configuration(64, 512 * 1024 * 1024UL, 32);
+      print_title_a();
+      test_main(apis_a, 64, 512 * 1024 * 1024UL, key_num_per_op, 32);
       cout << endl;
     }
 

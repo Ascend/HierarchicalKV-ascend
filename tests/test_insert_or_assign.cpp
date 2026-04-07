@@ -433,3 +433,54 @@ TEST(TestInsertOrAssign, test_little_demo_benchmark) {
                           device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 }
+
+void test_ddr_dim_basic(size_t dim) {
+  // 1. 初始化
+  init_env();
+  using K = int64_t;
+  using V = float;
+  using S = uint64_t;
+
+  // 2. 建表
+  constexpr size_t capacity = 128UL;
+  auto table = std::make_unique<npu::hkv::HashTable<K, V, S>>();
+
+  npu::hkv::HashTableOptions options;
+  options.init_capacity = capacity;
+  options.max_capacity = capacity;
+  options.max_hbm_for_vectors =
+      capacity * sizeof(V) * dim / 2;  // 一半device一半host
+  options.dim = dim;
+
+  table->init(options);
+  EXPECT_EQ(table->size(), 0);
+
+  // 3. 申请hbm内存
+  constexpr size_t key_num = 1024;
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  // 4. 空桶插值
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num, 0);
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
+  table->insert_or_assign(key_num, device_data.device_keys,
+                          device_data.device_values, nullptr,
+                          device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table->size(device_data.stream), capacity);
+
+  // 5. 校验插入结果
+  table->find(key_num, device_data.device_keys, device_data.device_values_ptr,
+              device_data.device_found, nullptr, device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+
+  check_result(host_values, key_num, device_data, capacity, dim);
+}
+
+TEST(TestInsertOrAssign, test_ddr_dim_8) { test_ddr_dim_basic(8); }
+
+TEST(TestInsertOrAssign, test_ddr_dim_1024) { test_ddr_dim_basic(1024); }

@@ -68,7 +68,17 @@ class DefaultAllocator : public virtual BaseAllocator {
         NPU_CHECK(aclrtMalloc(ptr, size, ACL_MEM_MALLOC_HUGE_FIRST));
         break;
       case MemoryType::Pinned:
-        NPU_CHECK(aclrtMallocHost(ptr, size));
+        aclrtMallocAttrValue attrValue;
+        attrValue.vaFlag = 1;
+
+        aclrtMallocAttribute attribute[1];
+        attribute[0].attr = ACL_RT_MEM_ATTR_VA_FLAG,
+        attribute[0].value = attrValue;
+
+        aclrtMallocConfig cfg;
+        cfg.numAttrs = 1;
+        cfg.attrs = attribute;
+        NPU_CHECK(aclrtMallocHostWithCfg(ptr, size, &cfg));
         break;
       case MemoryType::Host:
         *ptr = std::malloc(size);

@@ -48,6 +48,7 @@
 #include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
 #include "../hkv_hashtable/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel.h"
 #include "../hkv_hashtable/insert_or_assign_kernel/insert_or_assign_kernel.h"
+#include "tiling_helper.h"
 #include "../hkv_hashtable/insert_and_evict_kernel/insert_and_evict_kernel.h"
 #include "../hkv_hashtable/traverse_kernel/traverse_kernel.h"
 #include "../hkv_hashtable/remove_kernel/remove_kernel.h"
@@ -954,6 +955,7 @@ class HashTable : public HashTableBase<K, V, S> {
     auto platform = platform_ascendc::PlatformAscendCManager::GetInstance();
     HKV_CHECK(platform != nullptr, "get platform failed.");
     block_dim_ = platform->GetCoreNumAiv();
+    HKV_CHECK(block_dim_ != 0, "get block dim failed.");
     options_ = options;
     HKV_CHECK(options.reserved_key_start_bit >= 0 &&
                   options.reserved_key_start_bit <= MAX_RESERVED_KEY_BIT,
@@ -1094,22 +1096,54 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-    if (value_move_opt_.is_large_size) {
-      insert_or_assign_kernel_with_thread_1024<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
-        static_cast<void*>(table_->buckets), table_->buckets_size,
-        table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-        const_cast<key_type*>(keys), const_cast<value_type*>(values),
-        const_cast<score_type*>(scores), n, global_epoch_, value_move_opt_.size,
-        table_->max_bucket_shift, table_->capacity_divisor_magic,
-        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+    if (is_fast_mode()) {
+      if (value_move_opt_.is_large_size) {
+        insert_or_assign_kernel_with_thread_1024<K, V, S, evict_strategy_>
+            <<<block_dim_, 0, stream>>>(
+                static_cast<void*>(table_->buckets), table_->buckets_size,
+                table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+                const_cast<key_type*>(keys), const_cast<value_type*>(values),
+                const_cast<score_type*>(scores), n, global_epoch_,
+                value_move_opt_.size, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+                n_align_warp, value_move_opt_.cg_size);
+      } else {
+        insert_or_assign_kernel<K, V, S, evict_strategy_>
+            <<<block_dim_, 0, stream>>>(
+                static_cast<void*>(table_->buckets), table_->buckets_size,
+                table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+                const_cast<key_type*>(keys), const_cast<value_type*>(values),
+                const_cast<score_type*>(scores), n, global_epoch_,
+                value_move_opt_.size, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+                n_align_warp, value_move_opt_.cg_size);
+      }
     } else {
-      insert_or_assign_kernel<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
-        static_cast<void*>(table_->buckets), table_->buckets_size,
-        table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-        const_cast<key_type*>(keys), const_cast<value_type*>(values),
-        const_cast<score_type*>(scores), n, global_epoch_, value_move_opt_.size,
-        table_->max_bucket_shift, table_->capacity_divisor_magic,
-        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+      size_t size_all = n * sizeof(value_type*) + n * sizeof(key_type*);
+      auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+      auto temp_storage{dev_ws.get<uint8_t*>(0)};
+      value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+      key_type** d_dst_keys{
+          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+
+      // 1. find_and_lock位置：输出dst_value* value_index dst_key*
+      upsert_kernel_lock_key_hybrid<K, V, S, evict_strategy_>
+          <<<block_dim_, 0, stream>>>(
+              static_cast<void*>(table_->buckets), table_->buckets_size,
+              table_->capacity, table_->bucket_max_size, table_->dim,
+              const_cast<key_type*>(keys), const_cast<score_type*>(scores), n,
+              global_epoch_, table_->max_bucket_shift,
+              table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+              n_align_warp, d_dst_values, d_dst_keys);
+
+      // 2. io：搬运value，释放lock
+      auto tiling =
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+      write_kernel_unlock<K, V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+          tiling.former_num, tiling.former_core_move_num,
+          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+          table_->dim, const_cast<key_type*>(keys),
+          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
     }
 
     NpuCheckError();
