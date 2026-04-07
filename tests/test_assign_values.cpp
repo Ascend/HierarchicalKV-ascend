@@ -617,7 +617,7 @@ TEST_F(AssignValuesTest, small_dim) {
              stream_);
   ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
 
-  auto host_found = std::unique_ptr<bool[]>(new bool[key_num]());
+  auto host_found = std::make_unique<bool[]>(key_num);
   copy_to_host(host_found.get(), device_found, key_num);
 
   size_t found_num = 0;
@@ -691,7 +691,7 @@ TEST_F(AssignValuesTest, large_dim) {
   read_from_ptr(device_values_ptr, device_values_buffer, dim, key_num, stream_);
   ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
 
-  auto host_found = std::unique_ptr<bool[]>(new bool[key_num]());
+  auto host_found = std::make_unique<bool[]>(key_num);
   copy_to_host(host_found.get(), device_found, key_num);
   vector<V> real_values(key_num * dim, 0);
   copy_to_host(real_values.data(), device_values_buffer, key_num * dim);
@@ -770,7 +770,7 @@ TEST_F(AssignValuesTest, multiple_updates) {
                stream_);
     ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
 
-    auto host_found = std::unique_ptr<bool[]>(new bool[key_num]());
+    auto host_found = std::make_unique<bool[]>(key_num);
     copy_to_host(host_found.get(), device_found, key_num);
 
     size_t found_num = 0;
@@ -902,7 +902,7 @@ TEST_F(AssignValuesTest, shuffled_keys_update) {
              stream_);
   ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
 
-  auto host_found = std::unique_ptr<bool[]>(new bool[key_num]());
+  auto host_found = std::make_unique<bool[]>(key_num);
   copy_to_host(host_found.get(), device_found, key_num);
 
   size_t found_num = 0;
@@ -916,4 +916,272 @@ TEST_F(AssignValuesTest, shuffled_keys_update) {
   free_device_mem(device_scores);
   free_device_mem(device_values_ptr);
   free_device_mem(device_found);
+}
+
+// 测试13：使用 export_batch 验证 values 更新
+TEST_F(AssignValuesTest, verify_with_export_batch) {
+  constexpr size_t dim = 8;
+  constexpr size_t key_num = 256;
+
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = init_capacity,
+      .max_hbm_for_vectors = hbm_for_values,
+      .dim = dim,
+      .io_by_cpu = false,
+  };
+  HashTable<K, V, S, EvictStrategy::kLfu> table;
+  table.init(options);
+
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  vector<S> host_scores(key_num, 0);
+  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(),
+                                       host_values.data(), key_num);
+
+  K* device_keys = alloc_device_mem<K>(key_num);
+  V* device_values = alloc_device_mem<V>(key_num * dim);
+  S* device_scores = alloc_device_mem<S>(key_num);
+
+  copy_to_device(device_keys, host_keys.data(), key_num);
+  copy_to_device(device_values, host_values.data(), key_num * dim);
+  copy_to_device(device_scores, host_scores.data(), key_num);
+
+  table.insert_or_assign(key_num, device_keys, device_values, device_scores,
+                         stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(), key_num);
+
+  // 更新 values
+  vector<V> new_values(key_num * dim);
+  for (size_t i = 0; i < key_num; i++) {
+    for (size_t j = 0; j < dim; j++) {
+      new_values[i * dim + j] = 50000.0f + static_cast<V>(i * dim + j);
+    }
+  }
+  V* device_new_values = alloc_device_mem<V>(key_num * dim);
+  copy_to_device(device_new_values, new_values.data(), key_num * dim);
+
+  table.assign_values(key_num, device_keys, device_new_values, stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  // 使用 export_batch 导出并验证
+  K* export_keys = alloc_device_mem<K>(key_num);
+  V* export_values = alloc_device_mem<V>(key_num * dim);
+  S* export_scores = alloc_device_mem<S>(key_num);
+
+  size_t exported = table.export_batch(init_capacity, 0, export_keys,
+                                       export_values, export_scores, stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+  EXPECT_EQ(exported, key_num);
+
+  vector<K> real_keys(key_num, 0);
+  vector<V> real_values(key_num * dim, 0);
+  copy_to_host(real_keys.data(), export_keys, exported);
+  copy_to_host(real_values.data(), export_values, exported * dim);
+
+  // 构建 key 到 value 的映射用于验证
+  std::unordered_map<K, size_t> key_to_idx;
+  for (size_t i = 0; i < key_num; i++) {
+    key_to_idx[host_keys[i]] = i;
+  }
+
+  // 验证所有原始 keys 都被导出，且 values 已更新
+  for (size_t i = 0; i < exported; i++) {
+    K k = real_keys[i];
+    EXPECT_TRUE(key_to_idx.find(k) != key_to_idx.end())
+        << "Key " << k << " not found in original keys";
+    size_t orig_idx = key_to_idx[k];
+    for (size_t j = 0; j < dim; j++) {
+      EXPECT_FLOAT_EQ(real_values[i * dim + j], new_values[orig_idx * dim + j])
+          << "Value mismatch for key " << k << " dim " << j;
+    }
+  }
+
+  free_device_mem(device_keys);
+  free_device_mem(device_values);
+  free_device_mem(device_scores);
+  free_device_mem(device_new_values);
+  free_device_mem(export_keys);
+  free_device_mem(export_values);
+  free_device_mem(export_scores);
+}
+
+// 测试14：unique_key 参数测试
+TEST_F(AssignValuesTest, unique_key_param) {
+  constexpr size_t dim = 8;
+  constexpr size_t key_num = 128;
+
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = init_capacity,
+      .max_hbm_for_vectors = hbm_for_values,
+      .dim = dim,
+      .io_by_cpu = false,
+  };
+  HashTable<K, V, S, EvictStrategy::kLfu> table;
+  table.init(options);
+
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  vector<S> host_scores(key_num, 0);
+  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(),
+                                       host_values.data(), key_num);
+
+  K* device_keys = alloc_device_mem<K>(key_num);
+  V* device_values = alloc_device_mem<V>(key_num * dim);
+  S* device_scores = alloc_device_mem<S>(key_num);
+
+  copy_to_device(device_keys, host_keys.data(), key_num);
+  copy_to_device(device_values, host_values.data(), key_num * dim);
+  copy_to_device(device_scores, host_scores.data(), key_num);
+
+  table.insert_or_assign(key_num, device_keys, device_values, device_scores,
+                         stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  // 使用 unique_key=true 调用 assign_values
+  vector<V> new_values(key_num * dim, 7777.0f);
+  copy_to_device(device_values, new_values.data(), key_num * dim);
+
+  table.assign_values(key_num, device_keys, device_values, stream_, true);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  // 验证
+  V** device_values_ptr = alloc_device_mem<V*>(key_num);
+  bool* device_found = alloc_device_mem<bool>(key_num);
+
+  table.find(key_num, device_keys, device_values_ptr, device_found, nullptr,
+             stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  auto host_found = std::make_unique<bool[]>(key_num);
+  copy_to_host(host_found.get(), device_found, key_num);
+
+  size_t found_num = 0;
+  for (size_t i = 0; i < key_num; i++) {
+    if (host_found[i]) found_num++;
+  }
+  EXPECT_EQ(found_num, key_num);
+
+  free_device_mem(device_keys);
+  free_device_mem(device_values);
+  free_device_mem(device_scores);
+  free_device_mem(device_values_ptr);
+  free_device_mem(device_found);
+}
+
+// 测试15：unique_key=false 重复 key 更新
+TEST_F(AssignValuesTest, unique_key_false_duplicate_keys) {
+  constexpr size_t dim = 8;
+  constexpr size_t unique_key_num = 128;
+  constexpr size_t assign_key_num = 256;
+
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = init_capacity,
+      .max_hbm_for_vectors = hbm_for_values,
+      .dim = dim,
+      .io_by_cpu = false,
+  };
+  HashTable<K, V, S, EvictStrategy::kLfu> table;
+  table.init(options);
+
+  vector<K> unique_keys(unique_key_num, 0);
+  vector<V> insert_values(unique_key_num * dim, 0);
+  vector<S> insert_scores(unique_key_num, 0);
+  create_continuous_keys<K, S, V, dim>(unique_keys.data(), insert_scores.data(),
+                                       insert_values.data(), unique_key_num);
+
+  K* device_unique_keys = alloc_device_mem<K>(unique_key_num);
+  V* device_insert_values = alloc_device_mem<V>(unique_key_num * dim);
+  S* device_insert_scores = alloc_device_mem<S>(unique_key_num);
+
+  copy_to_device(device_unique_keys, unique_keys.data(), unique_key_num);
+  copy_to_device(device_insert_values, insert_values.data(),
+                 unique_key_num * dim);
+  copy_to_device(device_insert_scores, insert_scores.data(), unique_key_num);
+
+  table.insert_or_assign(unique_key_num, device_unique_keys,
+                         device_insert_values, device_insert_scores, stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(), unique_key_num);
+
+  // 构造带重复 key 的 assign 数组：assign_keys[i] = unique_keys[i %
+  // unique_key_num]
+  vector<K> assign_keys(assign_key_num, 0);
+  vector<V> assign_values(assign_key_num * dim, 0);
+  for (size_t i = 0; i < assign_key_num; i++) {
+    assign_keys[i] = unique_keys[i % unique_key_num];
+    for (size_t j = 0; j < dim; j++) {
+      assign_values[i * dim + j] = 1000.0f + static_cast<V>(i) + j * 0.1f;
+    }
+  }
+
+  K* device_assign_keys = alloc_device_mem<K>(assign_key_num);
+  V* device_assign_values = alloc_device_mem<V>(assign_key_num * dim);
+
+  copy_to_device(device_assign_keys, assign_keys.data(), assign_key_num);
+  copy_to_device(device_assign_values, assign_values.data(),
+                 assign_key_num * dim);
+
+  table.assign_values(assign_key_num, device_assign_keys, device_assign_values,
+                      stream_, false);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(), unique_key_num);
+
+  // 验证：对每个唯一 key 做 find，均应找到；value 应为本次 assign 中该 key
+  // 某一次写入
+  V** device_values_ptr = alloc_device_mem<V*>(unique_key_num);
+  bool* device_found = alloc_device_mem<bool>(unique_key_num);
+  V* device_values_buffer = alloc_device_mem<V>(unique_key_num * dim);
+
+  table.find(unique_key_num, device_unique_keys, device_values_ptr,
+             device_found, nullptr, stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  read_from_ptr(device_values_ptr, device_values_buffer, dim, unique_key_num,
+                stream_);
+  ASSERT_EQ(aclrtSynchronizeStream(stream_), ACL_ERROR_NONE);
+
+  auto host_found = std::make_unique<bool[]>(unique_key_num);
+  copy_to_host(host_found.get(), device_found, unique_key_num);
+  vector<V> real_values(unique_key_num * dim, 0);
+  copy_to_host(real_values.data(), device_values_buffer, unique_key_num * dim);
+
+  size_t found_count = 0;
+  for (size_t i = 0; i < unique_key_num; i++) {
+    EXPECT_TRUE(host_found[i])
+        << "Unique key at index " << i << " should be found";
+    if (host_found[i]) {
+      found_count++;
+      // 该 key 在 assign 中出现的下标为 i, i+unique_key_num，对应 value 为
+      // assign_values[i] 或 assign_values[i+unique_key_num]
+      bool match_first = true;
+      bool match_second = true;
+      for (size_t j = 0; j < dim; j++) {
+        V expected_first = assign_values[i * dim + j];
+        V expected_second = assign_values[(i + unique_key_num) * dim + j];
+        if (std::abs(real_values[i * dim + j] - expected_first) > 1e-5f) {
+          match_first = false;
+        }
+        if (std::abs(real_values[i * dim + j] - expected_second) > 1e-5f) {
+          match_second = false;
+        }
+      }
+      EXPECT_TRUE(match_first || match_second)
+          << "Value for key at index " << i
+          << " should match one of the assigned values";
+    }
+  }
+  EXPECT_EQ(found_count, unique_key_num);
+
+  free_device_mem(device_unique_keys);
+  free_device_mem(device_insert_values);
+  free_device_mem(device_insert_scores);
+  free_device_mem(device_assign_keys);
+  free_device_mem(device_assign_values);
+  free_device_mem(device_values_ptr);
+  free_device_mem(device_found);
+  free_device_mem(device_values_buffer);
 }
