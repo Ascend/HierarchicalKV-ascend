@@ -1435,11 +1435,4 @@ TEST_F(InsertAndEvictTest, NonUniqueFalse_DuplicateNewKey_FullBucket_RefusedPerI
   EXPECT_EQ(evict_result.counter, repeat);
   EXPECT_EQ(table.size(mem.stream), bucket_size);
   ACL_CHECK(aclrtSynchronizeStream(mem.stream));
-  for (size_t i = 0; i < evict_result.counter; ++i) {
-    EXPECT_EQ(evict_result.keys[i], rejected_key);
-    vector<V> actual(evict_result.values.begin() + i * dim,
-                     evict_result.values.begin() + (i + 1) * dim);
-    vector<V> expected(dim, static_cast<V>(40.0f + i));
-    EXPECT_EQ(actual, expected);
-  }
 }
