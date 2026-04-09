@@ -6,8 +6,8 @@ CURRENT_DIR=$(
 
 INSTALL_PREFIX="${CURRENT_DIR}/out"
 
-SHORT=h,r:,v:,i:,b:,p:,d:,c,t:,g
-LONG=help,run-mode:,soc-version:,install-path:,build-type:,install-prefix:,device:,compile-only,enable-test:,skip-disabled-test
+SHORT=h,r:,i:,b:,p:,d:,c,t:,g
+LONG=help,run-mode:,install-path:,build-type:,install-prefix:,device:,compile-only,enable-test:,skip-disabled-test
 OPTS=$(getopt -a --options $SHORT --longoptions $LONG -- "$@")
 eval set -- "$OPTS"
 SOC_VERSION="Ascend950PR_9579"
@@ -25,7 +25,6 @@ Usage: ${0##*} [OPTIONS] [ARGUMENTS]
 OPTIONS（可选参数）：
     -h, --help                打印帮助信息并退出
     -r, --run-mode MODE       指定编译方式MODE，可选择CPU仿真、NPU上板。支持参数为[sim / npu]，默认值为npu。
-    -v, --soc-version VERSION 指定昇腾AI处理器型号VERSION，默认值为Ascend950PR_9579。
     -i, --install-path PATH   指定cann的安装路径PATH，默认值为环境变量ASCEND_INSTALL_PATH。
     -b, --build-type TYPE     指定构建类型TYPE，默认值为"Release"。
     -p, --install-prefix PATH 指定安装路径PATH，默认为当前路径下的out目录。
@@ -44,10 +43,6 @@ while :; do
         ;;
     -r | --run-mode)
         RUN_MODE="$2"
-        shift 2
-        ;;
-    -v | --soc-version)
-        SOC_VERSION="$2"
         shift 2
         ;;
     -i | --install-path)

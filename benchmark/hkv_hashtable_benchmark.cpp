@@ -45,9 +45,6 @@ using std::setw;
 using namespace npu::hkv;
 using namespace benchmark;
 
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-
 enum class Test_Mode {
   pure_hbm = 0,
   hybrid = 1,
@@ -62,8 +59,6 @@ using S = uint64_t;
 using V = float;
 using EvictStrategy = npu::hkv::EvictStrategy;
 using TableOptions = npu::hkv::HashTableOptions;
-
-static uint32_t g_core_num_aiv = 0;
 
 constexpr uint32_t FLOAT_TYPR_BYTES = 4;
 constexpr int64_t RANDOM_MOD = 0;
@@ -894,14 +889,6 @@ void query_memory() {
 }
 
 int32_t main(int32_t argc, char* argv[]) {
-  const char* socVersion = TOSTRING(SOC_VERSION);
-  auto ascendc_platform =
-      platform_ascendc::PlatformAscendCManager::GetInstance(socVersion);
-  HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed, please check SOC_VERSION!");
-  g_core_num_aiv = ascendc_platform->GetCoreNumAiv();
-  std::cout << "Soc version: " << socVersion
-            << " aiv_num: " << g_core_num_aiv << std::endl;
-
   NPU_CHECK(aclInit(nullptr));
   auto device_id_env = std::getenv("HKV_TEST_DEVICE");
   int32_t device_id = 0;
@@ -912,10 +899,17 @@ int32_t main(int32_t argc, char* argv[]) {
     std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0" << std::endl;
   }
   NPU_CHECK(aclrtSetDevice(device_id));
-  std::cout << "aclrtGetSocName:" << aclrtGetSocName() << " device_id:" << device_id << std::endl;
+  auto ascendc_platform =
+      platform_ascendc::PlatformAscendCManager::GetInstance();
+  HKV_CHECK(ascendc_platform != nullptr,
+            "Get ascendc platform info failed!");
+  uint32_t block_dim = ascendc_platform->GetCoreNumAiv();
+  std::cout << "Soc version:" << aclrtGetSocName()
+            << " device_id:" << device_id
+            << " aiv_num: " << block_dim << std::endl;
   query_memory();
 
-  benchmark_hkv_hashtable(g_core_num_aiv);
+  benchmark_hkv_hashtable(block_dim);
 
   NPU_CHECK(aclrtResetDevice(device_id));
   NPU_CHECK(aclFinalize());
