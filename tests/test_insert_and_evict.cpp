@@ -32,7 +32,7 @@ using namespace test_util;
 using K = uint64_t;
 using V = float;
 using S = uint64_t;
-
+#define ACL_CHECK(expr) ASSERT_EQ((expr), ACL_ERROR_NONE)
 // 使用Customized淘汰策略，手动控制分数
 constexpr int EVICT_STRATEGY = EvictStrategy::kCustomized;
 
@@ -294,6 +294,25 @@ class InsertAndEvictTest : public ::testing::Test {
               ACL_ERROR_NONE);
 
     return result;
+  }
+ 
+  void ExpectValueScoreMatchesOneCandidate(
+      const vector<V>& actual_values, S actual_score,
+      const vector<vector<V>>& candidate_values,
+      const vector<S>& candidate_scores) {
+    ASSERT_EQ(candidate_values.size(), candidate_scores.size());
+    bool matched = false;
+    for (size_t i = 0; i < candidate_values.size(); ++i) {
+      if (candidate_scores[i] != actual_score) {
+        continue;
+      }
+      if (candidate_values[i] == actual_values) {
+        matched = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(matched)
+        << "final value/score should match one submitted candidate";
   }
 };
 
@@ -1154,5 +1173,273 @@ TEST_F(InsertAndEvictTest, EvictedScoresNullptr_ShouldWork) {
       EXPECT_EQ(values_ptr[i], nullptr)
           << "Key " << keys[i] << " not found but values_ptr is not null";
     }
+  }
+}
+
+TEST_F(InsertAndEvictTest, NonUniqueFalse_DuplicateExistingKey_NoEvict) {
+  constexpr size_t dim = DEFAULT_DIM;
+  HashTable<K, V, S, EVICT_STRATEGY> table;
+  InitTable(table, dim, DEFAULT_INIT_CAPACITY, DEFAULT_HBM_FOR_VALUES);
+
+  vector<K> base_keys(1, 1001);
+  vector<V> base_values(dim, 1.0f);
+  vector<S> base_scores(1, 10);
+
+  DeviceMemory base_mem;
+  base_mem.AllocateForInsert(1, dim);
+  CopyToDevice(base_keys, base_values, base_scores, base_mem, 1, dim);
+  table.insert_and_evict(1, base_mem.keys, base_mem.values, base_mem.scores,
+                         base_mem.evicted_keys, base_mem.evicted_values,
+                         base_mem.evicted_scores, base_mem.evicted_counter,
+                         base_mem.stream, true, false);
+  ASSERT_EQ(aclrtSynchronizeStream(base_mem.stream), ACL_ERROR_NONE);
+
+  constexpr size_t repeat = 4;
+  vector<K> dup_keys(repeat, base_keys[0]);
+  vector<V> dup_values(repeat * dim, 0.0f);
+  vector<S> dup_scores{101, 102, 103, 104};
+  vector<vector<V>> candidates;
+  for (size_t r = 0; r < repeat; ++r) {
+    vector<V> one(dim, static_cast<V>(10.0f + r));
+    candidates.push_back(one);
+    copy(one.begin(), one.end(), dup_values.begin() + r * dim);
+  }
+
+  DeviceMemory dup_mem;
+  dup_mem.AllocateForInsert(repeat, dim);
+  CopyToDevice(dup_keys, dup_values, dup_scores, dup_mem, repeat, dim);
+  table.insert_and_evict(repeat, dup_mem.keys, dup_mem.values, dup_mem.scores,
+                         dup_mem.evicted_keys, dup_mem.evicted_values,
+                         dup_mem.evicted_scores, dup_mem.evicted_counter,
+                         dup_mem.stream, false, false);
+  ASSERT_EQ(aclrtSynchronizeStream(dup_mem.stream), ACL_ERROR_NONE);
+
+  auto evict_result = GetEvictResult(dup_mem, repeat, dim);
+  EXPECT_EQ(evict_result.counter, 0);
+  EXPECT_EQ(table.size(dup_mem.stream), 1);
+  ACL_CHECK(aclrtSynchronizeStream(dup_mem.stream));
+
+  DeviceMemory find_mem;
+  find_mem.AllocateForFind(1, dim);
+  ASSERT_EQ(aclrtMemcpy(find_mem.keys, sizeof(K), base_keys.data(), sizeof(K),
+                        ACL_MEMCPY_HOST_TO_DEVICE), ACL_ERROR_NONE);
+  table.find(1, find_mem.keys, find_mem.values_ptr, find_mem.found,
+             find_mem.scores, find_mem.stream, true);
+  ASSERT_EQ(aclrtSynchronizeStream(find_mem.stream), ACL_ERROR_NONE);
+
+  vector<void*> value_ptrs(1);
+  vector<uint8_t> found(1);
+  vector<S> scores(1);
+  ASSERT_EQ(aclrtMemcpy(value_ptrs.data(), sizeof(V*), find_mem.values_ptr,
+                        sizeof(V*), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(found.data(), sizeof(bool), find_mem.found,
+                        sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(scores.data(), sizeof(S), find_mem.scores,
+                        sizeof(S), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_TRUE(found[0]);
+
+  vector<V> final_values(dim);
+  ASSERT_EQ(aclrtMemcpy(final_values.data(), dim * sizeof(V), value_ptrs[0],
+                        dim * sizeof(V), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ExpectValueScoreMatchesOneCandidate(final_values, scores[0], candidates,
+                                      dup_scores);
+}
+
+TEST_F(InsertAndEvictTest, NonUniqueFalse_DuplicateNewKey_EmptyBucket_SingleVisibleKey) {
+  constexpr size_t dim = DEFAULT_DIM;
+  HashTable<K, V, S, EVICT_STRATEGY> table;
+  InitTable(table, dim, DEFAULT_INIT_CAPACITY, DEFAULT_HBM_FOR_VALUES);
+
+  constexpr size_t repeat = 5;
+  const K new_key = 909090;
+  vector<K> keys(repeat, new_key);
+  vector<V> values(repeat * dim, 0.0f);
+  vector<S> scores{201, 202, 203, 204, 205};
+  vector<vector<V>> candidates;
+  for (size_t r = 0; r < repeat; ++r) {
+    vector<V> one(dim, static_cast<V>(20.0f + r));
+    candidates.push_back(one);
+    copy(one.begin(), one.end(), values.begin() + r * dim);
+  }
+
+  DeviceMemory mem;
+  mem.AllocateForInsert(repeat, dim);
+  CopyToDevice(keys, values, scores, mem, repeat, dim);
+  table.insert_and_evict(repeat, mem.keys, mem.values, mem.scores,
+                         mem.evicted_keys, mem.evicted_values,
+                         mem.evicted_scores, mem.evicted_counter,
+                         mem.stream, false, false);
+  ASSERT_EQ(aclrtSynchronizeStream(mem.stream), ACL_ERROR_NONE);
+
+  auto evict_result = GetEvictResult(mem, repeat, dim);
+  EXPECT_EQ(evict_result.counter, 0);
+  EXPECT_EQ(table.size(mem.stream), 1);
+  ACL_CHECK(aclrtSynchronizeStream(mem.stream));
+
+  DeviceMemory find_mem;
+  find_mem.AllocateForFind(1, dim);
+  ASSERT_EQ(aclrtMemcpy(find_mem.keys, sizeof(K), &new_key, sizeof(K),
+                        ACL_MEMCPY_HOST_TO_DEVICE), ACL_ERROR_NONE);
+  table.find(1, find_mem.keys, find_mem.values_ptr, find_mem.found,
+             find_mem.scores, find_mem.stream, true);
+  ASSERT_EQ(aclrtSynchronizeStream(find_mem.stream), ACL_ERROR_NONE);
+
+  vector<void*> value_ptrs(1);
+  vector<uint8_t> found(1);
+  vector<S> out_scores(1);
+  ASSERT_EQ(aclrtMemcpy(value_ptrs.data(), sizeof(V*), find_mem.values_ptr,
+                        sizeof(V*), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(found.data(), sizeof(bool), find_mem.found,
+                        sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(out_scores.data(), sizeof(S), find_mem.scores,
+                        sizeof(S), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_TRUE(found[0]);
+
+  vector<V> final_values(dim);
+  ASSERT_EQ(aclrtMemcpy(final_values.data(), dim * sizeof(V), value_ptrs[0],
+                        dim * sizeof(V), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ExpectValueScoreMatchesOneCandidate(final_values, out_scores[0], candidates,
+                                      scores);
+}
+
+TEST_F(InsertAndEvictTest, NonUniqueFalse_DuplicateNewKey_FullBucket_AcceptOnce) {
+  constexpr size_t dim = DEFAULT_DIM;
+  constexpr size_t bucket_size = 128;
+  constexpr size_t bucket_idx = 0;
+  constexpr size_t init_capacity = bucket_size * 4;
+  HashTable<K, V, S, EVICT_STRATEGY> table;
+  InitTable(table, dim, init_capacity, DEFAULT_HBM_FOR_VALUES, bucket_size);
+
+  vector<K> old_keys(bucket_size);
+  vector<V> old_values(bucket_size * dim);
+  vector<S> old_scores(bucket_size);
+  create_keys_in_one_buckets_lfu<K, S, V, DEFAULT_DIM>(
+      old_keys.data(), old_scores.data(), old_values.data(), bucket_size,
+      init_capacity, bucket_size, bucket_idx, 1, 10000000, 1000);
+  for (size_t i = 0; i < bucket_size; ++i) {
+    old_scores[i] = static_cast<S>(i);
+  }
+
+  DeviceMemory fill_mem;
+  fill_mem.AllocateForInsert(bucket_size, dim);
+  CopyToDevice(old_keys, old_values, old_scores, fill_mem, bucket_size, dim);
+  table.insert_and_evict(bucket_size, fill_mem.keys, fill_mem.values,
+                         fill_mem.scores, fill_mem.evicted_keys,
+                         fill_mem.evicted_values, fill_mem.evicted_scores,
+                         fill_mem.evicted_counter, fill_mem.stream,
+                         true, false);
+  ASSERT_EQ(aclrtSynchronizeStream(fill_mem.stream), ACL_ERROR_NONE);
+
+  constexpr size_t repeat = 4;
+  K new_key_arr[1];
+  S new_key_score_arr[1];
+  V new_key_value_arr[dim];
+  create_keys_in_one_buckets_lfu<K, S, V, DEFAULT_DIM>(
+      new_key_arr, new_key_score_arr, new_key_value_arr, 1, init_capacity,
+      bucket_size, bucket_idx, 10000001, 20000000, 1000);
+  const K new_key = new_key_arr[0];
+  vector<K> keys(repeat, new_key);
+  vector<V> values(repeat * dim, 0.0f);
+  vector<S> scores(repeat, 10000);
+  for (size_t r = 0; r < repeat; ++r) {
+    fill(values.begin() + r * dim, values.begin() + (r + 1) * dim,
+         static_cast<V>(30.0f + r));
+  }
+
+  DeviceMemory mem;
+  mem.AllocateForInsert(repeat, dim);
+  CopyToDevice(keys, values, scores, mem, repeat, dim);
+  table.insert_and_evict(repeat, mem.keys, mem.values, mem.scores,
+                         mem.evicted_keys, mem.evicted_values,
+                         mem.evicted_scores, mem.evicted_counter,
+                         mem.stream, false, false);
+  ASSERT_EQ(aclrtSynchronizeStream(mem.stream), ACL_ERROR_NONE);
+
+  auto evict_result = GetEvictResult(mem, repeat, dim);
+  EXPECT_EQ(evict_result.counter, 1);
+  EXPECT_EQ(table.size(mem.stream), bucket_size);
+  ACL_CHECK(aclrtSynchronizeStream(mem.stream));
+
+  unordered_set<K> old_set(old_keys.begin(), old_keys.end());
+  ASSERT_EQ(evict_result.keys.size(), 1);
+  EXPECT_TRUE(old_set.find(evict_result.keys[0]) != old_set.end());
+
+  DeviceMemory find_mem;
+  find_mem.AllocateForFind(1, dim);
+  ASSERT_EQ(aclrtMemcpy(find_mem.keys, sizeof(K), &new_key, sizeof(K),
+                        ACL_MEMCPY_HOST_TO_DEVICE), ACL_ERROR_NONE);
+  table.find(1, find_mem.keys, find_mem.values_ptr, find_mem.found,
+             find_mem.scores, find_mem.stream, true);
+  ASSERT_EQ(aclrtSynchronizeStream(find_mem.stream), ACL_ERROR_NONE);
+
+  vector<uint8_t> found(1);
+  ASSERT_EQ(aclrtMemcpy(found.data(), sizeof(bool), find_mem.found,
+                        sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST), ACL_ERROR_NONE);
+  ASSERT_TRUE(found[0]);
+}
+
+TEST_F(InsertAndEvictTest, NonUniqueFalse_DuplicateNewKey_FullBucket_RefusedPerInput) {
+  constexpr size_t dim = DEFAULT_DIM;
+  constexpr size_t bucket_size = 128;
+  constexpr size_t bucket_idx = 0;
+  constexpr size_t init_capacity = bucket_size * 4;
+  HashTable<K, V, S, EVICT_STRATEGY> table;
+  InitTable(table, dim, init_capacity, DEFAULT_HBM_FOR_VALUES, bucket_size);
+
+  vector<K> old_keys(bucket_size);
+  vector<V> old_values(bucket_size * dim);
+  vector<S> old_scores(bucket_size);
+  create_keys_in_one_buckets_lfu<K, S, V, DEFAULT_DIM>(
+      old_keys.data(), old_scores.data(), old_values.data(), bucket_size,
+      init_capacity, bucket_size, bucket_idx, 1, 10000000, 1000);
+  for (size_t i = 0; i < bucket_size; ++i) {
+    old_scores[i] = static_cast<S>(1000 + i);
+  }
+
+  DeviceMemory fill_mem;
+  fill_mem.AllocateForInsert(bucket_size, dim);
+  CopyToDevice(old_keys, old_values, old_scores, fill_mem, bucket_size, dim);
+  table.insert_and_evict(bucket_size, fill_mem.keys, fill_mem.values,
+                         fill_mem.scores, fill_mem.evicted_keys,
+                         fill_mem.evicted_values, fill_mem.evicted_scores,
+                         fill_mem.evicted_counter, fill_mem.stream,
+                         true, false);
+  ASSERT_EQ(aclrtSynchronizeStream(fill_mem.stream), ACL_ERROR_NONE);
+
+  constexpr size_t repeat = 3;
+  K rejected_key_arr[1];
+  S rejected_key_score_arr[1];
+  V rejected_key_value_arr[dim];
+  create_keys_in_one_buckets_lfu<K, S, V, DEFAULT_DIM>(
+      rejected_key_arr, rejected_key_score_arr, rejected_key_value_arr, 1,
+      init_capacity, bucket_size, bucket_idx, 10000001, 20000000, 1000);
+  const K rejected_key = rejected_key_arr[0];
+  vector<K> keys(repeat, rejected_key);
+  vector<V> values(repeat * dim, 0.0f);
+  vector<S> scores(repeat, 1);
+  for (size_t r = 0; r < repeat; ++r) {
+    fill(values.begin() + r * dim, values.begin() + (r + 1) * dim,
+         static_cast<V>(40.0f + r));
+  }
+
+  DeviceMemory mem;
+  mem.AllocateForInsert(repeat, dim);
+  CopyToDevice(keys, values, scores, mem, repeat, dim);
+  table.insert_and_evict(repeat, mem.keys, mem.values, mem.scores,
+                         mem.evicted_keys, mem.evicted_values,
+                         mem.evicted_scores, mem.evicted_counter,
+                         mem.stream, false, false);
+  ASSERT_EQ(aclrtSynchronizeStream(mem.stream), ACL_ERROR_NONE);
+
+  auto evict_result = GetEvictResult(mem, repeat, dim);
+  EXPECT_EQ(evict_result.counter, repeat);
+  EXPECT_EQ(table.size(mem.stream), bucket_size);
+  ACL_CHECK(aclrtSynchronizeStream(mem.stream));
+  for (size_t i = 0; i < evict_result.counter; ++i) {
+    EXPECT_EQ(evict_result.keys[i], rejected_key);
+    vector<V> actual(evict_result.values.begin() + i * dim,
+                     evict_result.values.begin() + (i + 1) * dim);
+    vector<V> expected(dim, static_cast<V>(40.0f + i));
+    EXPECT_EQ(actual, expected);
   }
 }

@@ -14,18 +14,28 @@
  * limitations under the License.
  */
 
- #ifndef ASCENDC_INSERT_AND_EVICT_KERNEL_H_
- #define ASCENDC_INSERT_AND_EVICT_KERNEL_H_
- 
- #include <cstdint>
- #include "kernel_operator.h"
- #include "../../include/types.h"
- #include "../../include/utils.h"
- #include "../../include/score_functor.h"
- 
- namespace npu {
- namespace hkv {
- using namespace AscendC;
+#ifndef ASCENDC_INSERT_AND_EVICT_KERNEL_H_
+#define ASCENDC_INSERT_AND_EVICT_KERNEL_H_
+
+#include <cstdint>
+#include "kernel_operator.h"
+#include "../../include/find_utils.h"
+#include "../../include/types.h"
+#include "../../include/utils.h"
+#include "../../include/score_functor.h"
+
+namespace npu {
+namespace hkv {
+using namespace AscendC;
+template <typename VecV, int32_t TILE_SIZE>
+__forceinline__ __device__ void copy_value(
+    __gm__ const VecV* src, __gm__ VecV* dst,
+    const uint32_t dim, const uint32_t lane_id) {
+  for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {
+    __stg<ST_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+          L1CacheType::NON_CACHEABLE>(dst + i, src[i]);
+  }
+}
  
  template <typename K = uint64_t, typename V = float, typename S = uint64_t, typename VecV = int32_t, int Strategy = -1>
  __simt_vf__ __aicore__
@@ -197,7 +207,122 @@
  }
  
  
- template <typename K = uint64_t, typename V = float, typename S = uint64_t,
+template <typename K = uint64_t, typename V = float, typename S = uint64_t,
+          typename VecV = int32_t, int32_t Strategy = -1,
+          int32_t TILE_SIZE = 32>
+__simt_vf__ __aicore__
+LAUNCH_BOUND(THREAD_NUM_512) inline void insert_and_evict_non_unique_kernel_vf(
+    __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
+    uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+    __gm__ const K* keys, __gm__ const V* values_gm,
+    __gm__ const S* scores, S cur_score, __gm__ K* evicted_keys,
+    __gm__ V* evicted_values_gm, __gm__ S* evicted_scores,
+    __gm__ size_t* d_evicted_counter,
+    uint64_t n, uint32_t thread_all, uint64_t global_epoch,
+    uint32_t block_index, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
+  if (buckets == nullptr || buckets_size == nullptr || keys == nullptr ||
+      values_gm == nullptr || evicted_keys == nullptr ||
+      evicted_values_gm == nullptr || d_evicted_counter == nullptr) {
+    return;
+  }
+
+  using ScoreFunctor = ScoreFunctor<K, V, S, Strategy>;
+
+  __gm__ const VecV* values =
+      reinterpret_cast<__gm__ const VecV*>(values_gm);
+  __gm__ VecV* evicted_values =
+      reinterpret_cast<__gm__ VecV*>(evicted_values_gm);
+  const uint32_t lane_id = threadIdx.x % TILE_SIZE;
+  const uint64_t N = n * TILE_SIZE;
+
+  for (uint64_t t = block_index * blockDim.x + threadIdx.x;
+       t < N; t += thread_all) {
+    const uint64_t key_idx = t / TILE_SIZE;
+
+    K key = keys[key_idx];
+    if (IS_RESERVED_KEY<K>(key)) {
+      continue;
+    }
+
+    S score = ScoreFunctor::desired_when_missed(
+        scores, key_idx, global_epoch, cur_score);
+    const K hashed_key = Murmur3HashDevice(key);
+    uint64_t global_idx = get_global_idx(
+        hashed_key, capacity_divisor_magic, capacity_divisor_shift, capacity);
+    uint32_t key_pos = global_idx & (bucket_max_size - 1);
+    const uint64_t bkt_idx = global_idx >> max_bucket_shift;
+
+    __gm__ Bucket<K, V, S>* bucket = buckets + bkt_idx;
+    __gm__ K* bucket_keys = bucket->keys_;
+    __gm__ VecV* bucket_values = reinterpret_cast<__gm__ VecV*>(bucket->vectors);
+    __gm__ S* bucket_scores = bucket->scores_;
+    __gm__ int32_t* bucket_size = buckets_size + bkt_idx;
+    __gm__ const VecV* input_value = values + key_idx * dim;
+
+    K evicted_key = static_cast<K>(EMPTY_KEY);
+    OccupyResult occupy_result;
+    do {
+      occupy_result = find_and_lock<K, S, TILE_SIZE>(
+          bucket_keys, bucket_scores, bucket_max_size,
+          key, score, key_pos, evicted_key, lane_id);
+    } while (occupy_result == OccupyResult::CONTINUE);
+
+    uint64_t evicted_idx = 0;
+    if (occupy_result == OccupyResult::REFUSED) {
+      if (lane_id == 0) {
+        evicted_idx = asc_atomic_add(d_evicted_counter, 1);
+        evicted_keys[evicted_idx] = key;
+        if (evicted_scores != nullptr) {
+          evicted_scores[evicted_idx] = score;
+        }
+      }
+      evicted_idx = asc_shfl(evicted_idx, 0, TILE_SIZE);
+      copy_value<VecV, TILE_SIZE>(
+          input_value, evicted_values + evicted_idx * dim, dim, lane_id);
+      continue;
+    }
+
+    if ((occupy_result == OccupyResult::OCCUPIED_EMPTY ||
+         occupy_result == OccupyResult::OCCUPIED_RECLAIMED) &&
+        lane_id == 0) {
+      asc_atomic_add(bucket_size, 1);
+    }
+
+    if (occupy_result == OccupyResult::EVICT) {
+      S old_score = static_cast<S>(EMPTY_SCORE);
+      if (lane_id == 0) {
+        old_score = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                          L1CacheType::NON_CACHEABLE>(bucket_scores + key_pos);
+        evicted_idx = asc_atomic_add(d_evicted_counter, 1);
+        evicted_keys[evicted_idx] = evicted_key;
+        if (evicted_scores != nullptr) {
+          evicted_scores[evicted_idx] = old_score;
+        }
+      }
+      evicted_idx = asc_shfl(evicted_idx, 0, TILE_SIZE);
+      copy_value<VecV, TILE_SIZE>(
+          bucket_values + key_pos * dim,
+          evicted_values + evicted_idx * dim,
+          dim, lane_id);
+    }
+
+    copy_value<VecV, TILE_SIZE>(
+        input_value, bucket_values + key_pos * dim, dim, lane_id);
+    asc_threadfence();
+
+    if (lane_id == 0) {
+      ScoreFunctor::update_with_digest(
+          bucket_keys, key_pos, scores, key_idx, score,
+          bucket_max_size, get_digest<K>(key),
+          occupy_result != OccupyResult::DUPLICATE);
+      asc_threadfence();
+      (void)asc_atomic_exch(bucket_keys + key_pos, key);
+    }
+  }
+}
+
+template <typename K = uint64_t, typename V = float, typename S = uint64_t,
            typename VecV = int32_t, int32_t Strategy = -1,
            int32_t EVICT_GROUP_SIZE = 16, int32_t COUNT_GROUP_SIZE = 32>
  __simt_vf__ __aicore__
@@ -554,8 +679,34 @@
    }
  }
  
- template <class K, class V, class S, int Strategy = -1>
- __global__ __vector__ void insert_and_evict_kernel(
+template <class K, class V, class S, int Strategy = -1>
+__global__ __vector__ void insert_and_evict_non_unique_kernel(
+    __gm__ Bucket<K, V, S>* buckets, __gm__ int* buckets_size,
+    uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+    __gm__ const K* keys, __gm__ const V* values, __gm__ const S* scores,
+    __gm__ K* evicted_keys, __gm__ V* evicted_values,
+    __gm__ S* evicted_scores, __gm__ size_t* d_evicted_counter,
+    uint64_t n, uint64_t global_epoch, uint32_t value_size,
+    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
+    uint64_t capacity_divisor_shift) {
+  constexpr uint32_t thread_num = THREAD_NUM_512;
+  const uint32_t thread_all = thread_num * GetBlockNum();
+  uint64_t cur_score =
+      (Strategy == npu::hkv::EvictStrategyInternal::kLru ||
+       Strategy == npu::hkv::EvictStrategyInternal::kEpochLru)
+          ? static_cast<uint64_t>(GetSystemCycle())
+          : 0;
+  DISPATCH_VALUE_SIZE(
+      value_size,
+      (asc_vf_call<insert_and_evict_non_unique_kernel_vf<K, V, S, DTYPE, Strategy>>(
+          dim3{thread_num}, buckets, buckets_size, capacity, bucket_max_size,
+          dim, keys, values, scores, cur_score, evicted_keys, evicted_values,
+          evicted_scores, d_evicted_counter,
+          n, thread_all, global_epoch, GetBlockIdx(), max_bucket_shift,
+          capacity_divisor_magic, capacity_divisor_shift)));
+}
+template <class K, class V, class S, int Strategy = -1>
+__global__ __vector__ void insert_and_evict_kernel(
      __gm__ Bucket<K, V, S>* buckets, __gm__ int* buckets_size, uint64_t capacity,
      uint32_t bucket_max_size, uint32_t dim,  __gm__ K* keys, __gm__ void* values,
      __gm__ S* scores,  __gm__ K* evicted_keys, __gm__ void* evicted_values,

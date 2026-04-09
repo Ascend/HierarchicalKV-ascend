@@ -1225,14 +1225,24 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-    insert_and_evict_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-      table_->buckets, table_->buckets_size,
-      table_->capacity, options_.max_bucket_size, value_move_opt_.dim,
-      const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
-      const_cast<score_type*>(scores), evicted_keys, static_cast<void*>(evicted_values),
-      evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
-      table_->max_bucket_shift, table_->capacity_divisor_magic,
-      table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+    if (unique_key) {
+      insert_and_evict_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->buckets_size,
+        table_->capacity, options_.max_bucket_size, value_move_opt_.dim,
+        const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
+        const_cast<score_type*>(scores), evicted_keys, static_cast<void*>(evicted_values),
+        evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
+        table_->max_bucket_shift, table_->capacity_divisor_magic,
+        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+    } else {
+      insert_and_evict_non_unique_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+        table_->buckets, table_->buckets_size, table_->capacity,
+        options_.max_bucket_size, value_move_opt_.dim,
+        keys, values, scores, evicted_keys, evicted_values,
+        evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
+        table_->max_bucket_shift, table_->capacity_divisor_magic,
+        table_->capacity_divisor_shift);
+    }
 
     NpuCheckError();
     return;
