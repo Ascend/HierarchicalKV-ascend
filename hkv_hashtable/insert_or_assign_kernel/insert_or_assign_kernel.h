@@ -866,7 +866,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void upsert_kernel_lock_key_hybrid_vf(
         occupy_result != OccupyResult::ILLEGAL) {
       d_dst_values[kv_idx] = bucket_values + key_pos * dim;
       d_dst_keys[kv_idx] = bucket_keys + key_pos;
-    } else {
+    } else if (kv_idx < n) {
       d_dst_values[kv_idx] = nullptr;
       d_dst_keys[kv_idx] = nullptr;
     }
