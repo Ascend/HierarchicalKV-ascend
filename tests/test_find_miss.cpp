@@ -27,7 +27,7 @@ class FindMissTest : public FindTestBase {
  public:
   static constexpr uint64_t INIT_CAPACITY = 1024UL * 1024;
   static constexpr uint64_t KEY_NUM = INIT_CAPACITY;
-  static constexpr size_t DIM = DEFAULT_DIM;
+  static constexpr size_t DIM = 16;
 
   void VerifyFindMissResults(const vector<K>& query_keys,
                              const vector<V>& result_values,
@@ -162,6 +162,8 @@ class FindMissTest : public FindTestBase {
       ASSERT_EQ(h_missed_size, static_cast<int>(KEY_NUM));
     } else {
       ASSERT_GE(h_missed_size, 0);
+      auto expected_missed_size = KEY_NUM - table.size(stream);
+      ASSERT_EQ(h_missed_size, expected_missed_size);
       ASSERT_LT(h_missed_size, static_cast<int>(KEY_NUM));
 
       K* h_missed_keys = nullptr;
@@ -222,13 +224,13 @@ TEST_F(FindMissTest, WhenEmpty) {
   TestFindMiss(1024, 128, 0.0);
   TestFindMiss(1024, 256, 0.0, 12);
 
-  // TODO: pure HMEM
-  // TestFindMiss(0, 128, 0.0, 12);
-  // TestFindMiss(0, 256, 0.0);
+  // pure HMEM
+  TestFindMiss(0, 128, 0.0, 12);
+  TestFindMiss(0, 256, 0.0);
 
-  // TODO: hybrid
-  // TestFindMiss(32, 128, 0.0, 58);
-  // TestFindMiss(32, 256, 0.0);
+  // hybrid
+  TestFindMiss(32, 128, 0.0, 58);
+  TestFindMiss(32, 256, 0.0);
 }
 
 // 用例2: 满表测试 - load_factor=1.0，所有key都应找到
@@ -237,13 +239,13 @@ TEST_F(FindMissTest, WhenFull) {
   TestFindMiss(1024, 128, 1.0);
   TestFindMiss(1024, 256, 1.0);
 
-  // TODO: pure HMEM
-  // TestFindMiss(0, 128, 1.0);
-  // TestFindMiss(0, 256, 1.0);
+  // pure HMEM
+  TestFindMiss(0, 128, 1.0);
+  TestFindMiss(0, 256, 1.0);
 
-  // TODO: hybrid
-  // TestFindMiss(32, 128, 1.0);
-  // TestFindMiss(32, 256, 1.0, 60);
+  // hybrid
+  TestFindMiss(32, 128, 1.0);
+  TestFindMiss(32, 256, 1.0, 60);
 }
 
 // 用例3: 不同load_factor - 部分命中
@@ -252,32 +254,32 @@ TEST_F(FindMissTest, LoadFactor) {
   // pure HBM
   TestFindMiss(1024, 128, 0.2, 9);
   TestFindMiss(1024, 256, 0.2, 38);
-  // TODO: pure HMEM
-  // TestFindMiss(0, 128, 0.2, 45);
-  // TestFindMiss(0, 256, 0.2, 12);
-  // TODO: hybrid
-  // TestFindMiss(32, 128, 0.2, 27);
-  // TestFindMiss(32, 256, 0.2, 53);
+  // pure HMEM
+  TestFindMiss(0, 128, 0.2, 45);
+  TestFindMiss(0, 256, 0.2, 12);
+  // hybrid
+  TestFindMiss(32, 128, 0.2, 27);
+  TestFindMiss(32, 256, 0.2, 53);
 
   // load_factor = 0.5
   // pure HBM
   TestFindMiss(1024, 128, 0.5, 4);
   TestFindMiss(1024, 256, 0.5, 22);
-  // TODO: pure HMEM
-  // TestFindMiss(0, 128, 0.5, 21);
-  // TestFindMiss(0, 256, 0.5, 46);
-  // TODO: hybrid
-  // TestFindMiss(32, 128, 0.5, 31);
-  // TestFindMiss(32, 256, 0.5, 59);
+  // pure HMEM
+  TestFindMiss(0, 128, 0.5, 21);
+  TestFindMiss(0, 256, 0.5, 46);
+  // hybrid
+  TestFindMiss(32, 128, 0.5, 31);
+  TestFindMiss(32, 256, 0.5, 59);
 
   // load_factor = 0.75
   // pure HBM
   TestFindMiss(1024, 128, 0.75, 7);
   TestFindMiss(1024, 256, 0.75, 29);
-  // TODO: pure HMEM
-  // TestFindMiss(0, 128, 0.75, 11);
-  // TestFindMiss(0, 256, 0.75, 34);
-  // TODO: hybrid
-  // TestFindMiss(32, 128, 0.75, 18);
-  // TestFindMiss(32, 256, 0.75, 47);
+  // pure HMEM
+  TestFindMiss(0, 128, 0.75, 11);
+  TestFindMiss(0, 256, 0.75, 34);
+  // hybrid
+  TestFindMiss(32, 128, 0.75, 18);
+  TestFindMiss(32, 256, 0.75, 47);
 }

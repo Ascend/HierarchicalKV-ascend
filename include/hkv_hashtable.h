@@ -42,6 +42,8 @@
 #include "../hkv_hashtable/find_ptr_kernel/find_ptr_kernel.h"
 #include "../hkv_hashtable/find_kernel/find_with_digest_kernel.h"
 #include "../hkv_hashtable/find_kernel/find_miss_with_digest_kernel.h"
+#include "../hkv_hashtable/find_kernel/find_miss_with_digest_kernel_hybrid.h"
+#include "../hkv_hashtable/utils_kernel/utils_kernel.h"
 #include "../hkv_hashtable/contains_kernel/contains_kernel.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel_with_filter.h"
 #include "../hkv_hashtable/assign_scores_kernel/assign_scores_kernel.h"
@@ -1766,12 +1768,27 @@ class HashTable : public HashTableBase<K, V, S> {
           global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
           table_->capacity_divisor_magic, table_->capacity_divisor_shift,
           n_align_warp, value_move_opt_.cg_size);
-      NpuCheckError();
     } else {
-      std::cout << "[Unsupport find yet]\n";
+      size_t size_all = n * sizeof(value_type*);
+      auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+      auto temp_storage{dev_ws.get<uint8_t*>(0)};
+      value_type** d_src_values{reinterpret_cast<value_type**>(temp_storage)};
 
-      NpuCheckError();
+      find_ptr_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity, table_->buckets_num,
+          static_cast<uint32_t>(table_->bucket_max_size), table_->dim,
+          const_cast<key_type*>(keys), d_src_values, scores, founds, n,
+          global_epoch_, table_->max_bucket_shift,
+          table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+
+      auto tiling =
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+      read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+          tiling.former_num, tiling.former_core_move_num,
+          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+          table_->dim, values, n, d_src_values);
     }
+    NpuCheckError();
   }
 
   /**
@@ -1818,12 +1835,28 @@ class HashTable : public HashTableBase<K, V, S> {
           table_->max_bucket_shift, table_->capacity_divisor_magic,
           table_->capacity_divisor_shift, n_align_warp,
           static_cast<int32_t>(value_move_opt_.cg_size));
-      NpuCheckError();
     } else {
-      std::cout << "[Unsupport find yet]\n";
+      size_t size_all = n * sizeof(value_type*);
+      auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+      auto temp_storage{dev_ws.get<uint8_t*>(0)};
+      value_type** d_src_values{reinterpret_cast<value_type**>(temp_storage)};
 
-      NpuCheckError();
+      find_miss_with_digest_kernel_hybrid<K, V, S><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity,
+          static_cast<uint32_t>(options_.max_bucket_size), table_->dim,
+          const_cast<key_type*>(keys), d_src_values, scores,
+          missed_keys, missed_indices, missed_size, n,
+          table_->max_bucket_shift, table_->capacity_divisor_magic,
+          table_->capacity_divisor_shift, n_align_warp);
+
+      auto tiling =
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+      read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+          tiling.former_num, tiling.former_core_move_num,
+          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+          table_->dim, values, n, d_src_values);
     }
+    NpuCheckError();
   }
 
   /**

@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include "test_find_base.h"
+#include "test_device_data.h"
 
 // find(value copy) 专用测试类
 class FindValueTest : public FindTestBase {
@@ -791,7 +792,87 @@ TEST_F(FindValueTest, NotFound_InitialValuePreserved) {
   ASSERT_EQ(aclrtDestroyStream(stream), ACL_ERROR_NONE);
 }
 
-// 用例11: IS_RESERVED_KEY 保留键场景 - 混合正常key和所有保留key
+static void test_find_hybrid_dim(size_t dim) {
+  SCOPED_TRACE(::testing::Message() << "dim = " << dim);
+
+  constexpr size_t capacity = 128UL;
+
+  auto table = std::make_unique<HashTable<K, V, S>>();
+  HashTableOptions options;
+  options.init_capacity = capacity;
+  options.max_capacity = capacity;
+  options.max_hbm_for_vectors = capacity * sizeof(V) * dim / 2;
+  options.dim = dim;
+  table->init(options);
+  EXPECT_EQ(table->size(), 0);
+
+  constexpr size_t key_num = 1024;
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num, 0);
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
+
+  table->insert_or_assign(key_num, device_data.device_keys,
+                          device_data.device_values, nullptr,
+                          device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table->size(device_data.stream), capacity);
+
+  ASSERT_EQ(aclrtMemset(device_data.device_values,
+                        key_num * sizeof(V) * dim, 0,
+                        key_num * sizeof(V) * dim),
+            ACL_ERROR_NONE);
+
+  table->find(key_num, device_data.device_keys, device_data.device_values,
+              device_data.device_found, nullptr, device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+
+  bool* host_found = nullptr;
+  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                            key_num * sizeof(bool)),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(host_found, key_num * sizeof(bool),
+                        device_data.device_found, key_num * sizeof(bool),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+
+  vector<V> result_values(key_num * dim);
+  ASSERT_EQ(aclrtMemcpy(result_values.data(), key_num * dim * sizeof(V),
+                        device_data.device_values, key_num * dim * sizeof(V),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+
+  size_t found_num = 0;
+  for (size_t i = 0; i < key_num; i++) {
+    if (host_found[i]) {
+      found_num++;
+      for (size_t j = 0; j < dim; j++) {
+        EXPECT_EQ(result_values[i * dim + j], host_values[i * dim + j])
+            << "key=" << host_keys[i] << " dim_idx=" << j;
+      }
+    }
+  }
+  EXPECT_EQ(found_num, capacity);
+
+  ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+}
+
+// 用例11: hybrid模式 - dim=8
+TEST_F(FindValueTest, HybridMode_Dim8) {
+  test_find_hybrid_dim(8);
+}
+
+// 用例12: hybrid模式 - dim=1024
+TEST_F(FindValueTest, HybridMode_Dim1024) {
+  test_find_hybrid_dim(1024);
+}
+
+// 用例13: IS_RESERVED_KEY 保留键场景 - 混合正常key和所有保留key
 TEST_F(FindValueTest, ReservedKeys_MixedWithNormalKeys) {
   constexpr size_t dim = DEFAULT_DIM;
   constexpr size_t normal_key_num = 1024;

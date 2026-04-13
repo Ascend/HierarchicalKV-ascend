@@ -197,13 +197,13 @@ void test_main(double load_factor, double missed_ratio) {
     test_find(capacities_hbm[i], dim_hbm[i], max_hbm_for_vectors_mb_hbm[i], load_factor, 256, missed_ratio);
     test_find(capacities_hbm[i], dim_hbm[i], max_hbm_for_vectors_mb_hbm[i], load_factor, 128, missed_ratio);
   }
-
-  // TODO: hybrid mode
-  // test_find(CAPACITY, 8, 1 * 1024UL, load_factor, 256, missed_ratio);
-  // test_find(CAPACITY, 8, 1 * 1024UL, load_factor, 128, missed_ratio);
-  // TODO: pure HMEM mode
-  // test_find(CAPACITY, 8, 0, load_factor, 256, missed_ratio);
-  // test_find(CAPACITY, 8, 0, load_factor, 128, missed_ratio);
+  constexpr size_t CAPACITY = 100000000UL;
+  // hybrid mode
+  test_find(CAPACITY, 8, 1 * 1024UL, load_factor, 256, missed_ratio);
+  test_find(CAPACITY, 8, 1 * 1024UL, load_factor, 128, missed_ratio);
+  // pure HMEM mode
+  test_find(CAPACITY, 8, 0, load_factor, 256, missed_ratio);
+  test_find(CAPACITY, 8, 0, load_factor, 128, missed_ratio);
 }
 
 void query_memory() {

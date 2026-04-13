@@ -853,6 +853,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
     {
       std::vector<API_Select> apis_a{
         API_Select::insert_or_assign,
+        API_Select::find,
       };
       
       cout << "### On HBM+HMEM hybrid mode: " << endl;
