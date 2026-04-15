@@ -309,11 +309,11 @@
  template <typename K>
  __simt_vf__ __aicore__
  LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_unlock_key_vf(
-     __gm__ const K* __restrict__ keys, __gm__ K* __gm__* __restrict__ key_ptrs, uint64_t n, uint32_t blockIdx) {
-   int kv_idx = blockIdx * blockDim.x + threadIdx.x;
+     __gm__ const K* __restrict__ keys, __gm__ K* __gm__* __restrict__ key_ptrs, uint64_t n, uint64_t thread_all, uint32_t blockIdx) {
+   uint64_t kv_idx = blockIdx * blockDim.x + threadIdx.x;
    K key;
    __gm__ K* key_ptr{nullptr};
-   if (kv_idx < n) {
+   for (; kv_idx < n; kv_idx += thread_all) {
      key = keys[kv_idx];
      key_ptr = key_ptrs[kv_idx];
      if (key_ptr) {
@@ -436,9 +436,9 @@ __global__ __vector__ void find_or_insert_ptr_kernel_unlock_key_v2(
     __gm__ const K* keys, __gm__ K* __gm__* key_ptrs, uint64_t n) {
   
   const uint64_t thread_all = THREAD_NUM_512 * GetBlockNum();
-  
   asc_vf_call<find_or_insert_ptr_kernel_unlock_key_vf<K>>(
-    dim3{static_cast<uint32_t>(THREAD_NUM_512)}, keys, key_ptrs, n, GetBlockIdx());
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, keys, key_ptrs, n,
+      thread_all, GetBlockIdx());
 }
 
 template <class K, class V, class S, int Strategy = -1>
