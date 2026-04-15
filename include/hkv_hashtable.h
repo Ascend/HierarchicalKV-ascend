@@ -1140,7 +1140,7 @@ class HashTable : public HashTableBase<K, V, S> {
 
       // 2. io：搬运value，释放lock
       auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
       write_kernel_unlock<K, V><<<block_dim_, tiling.valid_ub_size, stream>>>(
           tiling.former_num, tiling.former_core_move_num,
           tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
@@ -1782,7 +1782,7 @@ class HashTable : public HashTableBase<K, V, S> {
           table_->capacity_divisor_magic, table_->capacity_divisor_shift);
 
       auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
       read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
           tiling.former_num, tiling.former_core_move_num,
           tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
@@ -1850,7 +1850,7 @@ class HashTable : public HashTableBase<K, V, S> {
           table_->capacity_divisor_shift, n_align_warp);
 
       auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type));
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
       read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
           tiling.former_num, tiling.former_core_move_num,
           tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
@@ -2403,14 +2403,46 @@ class HashTable : public HashTableBase<K, V, S> {
           bucket_memory_pool_manager_->use_pool()) {
         bucket_memory_pool_manager_->ensure_capacity(table_->buckets_num * 2);
       }
-      double_capacity(
-          &table_, allocator_, block_dim_,
-          bucket_memory_pool_manager_ != nullptr
-              ? bucket_memory_pool_manager_.get()
-              : nullptr);
+      double_capacity(&table_, allocator_, block_dim_,
+                      bucket_memory_pool_manager_ != nullptr
+                          ? bucket_memory_pool_manager_.get()
+                          : nullptr);
       sync_table_configuration();
 
-      rehash_kernel<K, V, S><<<block_dim_, 0, stream>>>(d_table_, table_->buckets_num / 2);
+      if (is_fast_mode()) {
+        rehash_kernel<K, V, S, true><<<block_dim_, 0, stream>>>(
+            d_table_, table_->buckets_num / 2, nullptr, nullptr, nullptr);
+      } else {
+        size_t old_capacity = capacity() / 2;
+        size_t size_all = old_capacity * (sizeof(value_type*) +
+                                          sizeof(uint32_t) + sizeof(uint32_t));
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        uint32_t* d_bkt_src_pos{reinterpret_cast<uint32_t*>(
+            temp_storage + old_capacity * sizeof(value_type*))};
+        uint32_t* d_bkt_dst_pos{reinterpret_cast<uint32_t*>(
+            temp_storage + old_capacity * sizeof(value_type*) +
+            old_capacity * sizeof(uint32_t))};
+
+        // 1. rehash时不进行value搬运，但记录最终位置
+        rehash_kernel<K, V, S, false><<<block_dim_, 0, stream>>>(
+            d_table_, table_->buckets_num / 2, d_dst_values, d_bkt_src_pos,
+            d_bkt_dst_pos);
+
+        // 2. 搬运value
+        // 因为搬运仅为老桶中操作，因此tiling值需要计算老桶数，sizeof(value_type)
+        // * 2是因为算子内部有两个tensor
+        auto tiling =
+            GetValueMoveTiling(table_->buckets_num / 2, block_dim_, table_->dim,
+                               sizeof(value_type) * 2, true);
+        rehash_write_kernel<K, V, S>
+            <<<block_dim_, tiling.valid_ub_size, stream>>>(
+                tiling.former_num, tiling.former_core_move_num,
+                tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+                table_->dim, old_capacity, table_->buckets,
+                table_->bucket_max_size, d_dst_values, d_bkt_dst_pos);
+      }
       NPU_CHECK(aclrtSynchronizeDevice());
     }
 

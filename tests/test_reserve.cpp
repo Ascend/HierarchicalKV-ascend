@@ -16,10 +16,12 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <vector>
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
+#include "test_device_data.h"
 #include "test_util.h"
 
 using namespace std;
@@ -30,35 +32,26 @@ using K = uint64_t;
 using V = float;
 using S = uint64_t;
 
-TEST(test_reserve, test_reserve_all_hbm) {
+void test_reserve_basic(size_t dim, size_t key_num, size_t init_capacity,
+                        size_t max_capacity, size_t max_hbm_for_vectors) {
   // 1. 初始化
   init_env();
 
   size_t total_mem = 0;
   size_t free_mem = 0;
-  constexpr size_t hbm_for_values = 1UL << 30;
   ASSERT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
             ACL_ERROR_NONE);
-  ASSERT_GT(free_mem, hbm_for_values)
+  ASSERT_GT(free_mem, max_hbm_for_vectors)
       << "free HBM is not enough free:" << free_mem
-      << "need:" << hbm_for_values;
-
-  constexpr size_t dim = 8;
-  constexpr size_t key_num = 1UL * 1024;
-  constexpr size_t init_capacity = 128UL * 1024;
-  constexpr size_t max_capacity = init_capacity * 128;
-
-  size_t each_key_size = sizeof(K);
-  size_t each_score_size = sizeof(S);
-  size_t each_value_size = sizeof(V);
+      << "need:" << max_hbm_for_vectors;
 
   // 2. 建表
   HashTableOptions options{
       .init_capacity = init_capacity,
       .max_capacity = max_capacity,
-      .max_hbm_for_vectors = hbm_for_values,
+      .max_hbm_for_vectors = max_hbm_for_vectors,
       .dim = dim,
-      .io_by_cpu = false,
+      .max_load_factor = 1.0f,
   };
   using Table = HashTable<K, V>;
 
@@ -69,94 +62,214 @@ TEST(test_reserve, test_reserve_all_hbm) {
   vector<K> host_keys(key_num, 0);
   vector<V> host_values(key_num * dim, 0);
 
-  // 3.2 申请hbm内存
-  K* device_keys = nullptr;
-  V* device_values = nullptr;
-  V** device_values_ptr = nullptr;
-  bool* device_found = nullptr;
-  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_keys),
-                        key_num * each_key_size, ACL_MEM_MALLOC_HUGE_FIRST),
-            ACL_ERROR_NONE);
-  ASSERT_EQ(
-      aclrtMalloc(reinterpret_cast<void**>(&device_values),
-                  key_num * each_value_size * dim, ACL_MEM_MALLOC_HUGE_FIRST),
-      ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_values_ptr),
-                        key_num * sizeof(V*), ACL_MEM_MALLOC_HUGE_FIRST),
-            ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_found),
-                        key_num * sizeof(bool), ACL_MEM_MALLOC_HUGE_FIRST),
-            ACL_ERROR_NONE);
-
-  aclrtStream stream = nullptr;
-  ASSERT_EQ(aclrtCreateStream(&stream), ACL_ERROR_NONE);
+  // 3. 使用DeviceData管理设备内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
 
   // 4. 插值
   // 4.1 生产连续值
-  create_continuous_keys<K, S, V, dim>(host_keys.data(), nullptr, nullptr, key_num);
-  ASSERT_EQ(aclrtMemcpy(device_keys, key_num * each_key_size, host_keys.data(),
-                        key_num * each_key_size, ACL_MEMCPY_HOST_TO_DEVICE),
-            ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtMemcpy(device_values, key_num * each_value_size * dim,
-                        host_values.data(), key_num * each_value_size * dim,
-                        ACL_MEMCPY_HOST_TO_DEVICE),
-            ACL_ERROR_NONE);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num);
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
 
   // 4.2 插值
-  table.insert_or_assign(key_num, device_keys, device_values, nullptr, stream);
-  ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
-  EXPECT_EQ(table.size(stream), key_num);
+  table.insert_or_assign(key_num, device_data.device_keys,
+                         device_data.device_values, nullptr,
+                         device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(device_data.stream), key_num);
 
   // 5. 验证reserve
   auto cur_capacity = table.capacity();
-  auto load_factor = table.load_factor(stream);
+  auto load_factor = table.load_factor(device_data.stream);
   EXPECT_EQ(cur_capacity, init_capacity);
   EXPECT_EQ(load_factor, (key_num * 1.0) / (init_capacity * 1.0));
-  EXPECT_EQ(table.size(stream), key_num);
+  EXPECT_EQ(table.size(device_data.stream), key_num);
   // 5.1 不能缩小
-  table.reserve(cur_capacity / 2, stream);
-  load_factor = table.load_factor(stream);
+  table.reserve(cur_capacity / 2, device_data.stream);
+  load_factor = table.load_factor(device_data.stream);
   cur_capacity = table.capacity();
   EXPECT_EQ(cur_capacity, init_capacity);
-  EXPECT_EQ(table.size(stream), key_num);
+  EXPECT_EQ(table.size(device_data.stream), key_num);
   EXPECT_EQ(load_factor, (key_num * 1.0) / (init_capacity * 1.0));
   // 5.2 容量满足不扩容
   table.reserve(cur_capacity);
-  load_factor = table.load_factor(stream);
+  load_factor = table.load_factor(device_data.stream);
   cur_capacity = table.capacity();
   EXPECT_EQ(cur_capacity, init_capacity);
-  EXPECT_EQ(table.size(stream), key_num);
+  EXPECT_EQ(table.size(device_data.stream), key_num);
   EXPECT_EQ(load_factor, (key_num * 1.0) / (init_capacity * 1.0));
   // 5.3 按2倍扩容
-  table.reserve(cur_capacity + 1, stream);
+  table.reserve(cur_capacity + 1, device_data.stream);
   cur_capacity = table.capacity();
-  load_factor = table.load_factor(stream);
+  load_factor = table.load_factor(device_data.stream);
   EXPECT_EQ(cur_capacity, init_capacity * 2);
   EXPECT_EQ(load_factor, (key_num * 1.0) / (init_capacity * 2.0));
-  EXPECT_EQ(table.size(stream), key_num);
+  EXPECT_EQ(table.size(device_data.stream), key_num);
   // 5.4 按最大容量扩容
-  table.reserve(max_capacity);
+  size_t target_capacity = init_capacity * 2;
+  while (target_capacity <= max_capacity) {
+    table.reserve(target_capacity);
+    cur_capacity = table.capacity();
+    load_factor = table.load_factor(device_data.stream);
+    EXPECT_EQ(cur_capacity, target_capacity);
+    EXPECT_EQ(load_factor, (key_num * 1.0) / (target_capacity * 1.0));
+    EXPECT_EQ(table.size(device_data.stream), key_num);
+
+    // 6. 校验扩容后，value不变
+    table.find(key_num, device_data.device_keys, device_data.device_values_ptr,
+               device_data.device_found, nullptr, device_data.stream);
+    ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+
+    bool* host_found = nullptr;
+    ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                              key_num * sizeof(bool)),
+              ACL_ERROR_NONE);
+    ASSERT_EQ(aclrtMemcpy(host_found, key_num * sizeof(bool),
+                          device_data.device_found, key_num * sizeof(bool),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+    vector<void*> real_values_ptr(key_num, nullptr);
+    ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*),
+                          device_data.device_values_ptr,
+                          key_num * sizeof(void*), ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+    size_t found_num = 0;
+    for (size_t i = 0; i < key_num; i++) {
+      if (host_found[i]) {
+        ASSERT_NE(real_values_ptr[i], nullptr);
+        found_num++;
+
+        vector<V> real_values(dim, 0);
+        ASSERT_EQ(
+            aclrtMemcpy(real_values.data(), dim * device_data.each_value_size,
+                        real_values_ptr[i], dim * device_data.each_value_size,
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+        vector<V> expect_values(host_values.begin() + i * dim,
+                                host_values.begin() + i * dim + dim);
+        uint64_t hash = test_util::Murmur3HashHost(host_keys[i]);
+        hash = hash % (table.capacity() / 2);
+        uint64_t bkt_idx = hash / table.max_bucket_size();
+        uint64_t key_pos = hash % table.max_bucket_size();
+        ASSERT_EQ(expect_values, real_values)
+            << "key id :" << host_keys[i] << " bkt_idx:" << bkt_idx
+            << " key_pos:" << key_pos;
+      } else {
+        EXPECT_EQ(real_values_ptr[i], nullptr);
+      }
+    }
+    ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+    EXPECT_EQ(found_num, key_num);
+    target_capacity *= 2;
+  }
+  table.clear(device_data.stream);
+  EXPECT_EQ(table.size(device_data.stream), 0);
+}
+
+TEST(test_reserve, test_reserve_all_hbm) {
+  constexpr size_t dim = 8;
+  constexpr size_t key_num = 1UL * 1024;
+  constexpr size_t init_capacity = 128UL * 1024;
+  constexpr size_t max_capacity = init_capacity * 128;
+  constexpr size_t hbm_for_values = 1UL << 30;
+  test_reserve_basic(dim, key_num, init_capacity, max_capacity, hbm_for_values);
+}
+
+TEST(test_reserve, test_reserve_to_ddr) {
+  constexpr size_t dim = 16;
+  constexpr size_t key_num = 2UL * 1024;
+  constexpr size_t init_capacity = 128UL * 1024;
+  constexpr size_t max_capacity = init_capacity * 128;
+  size_t max_hbm_for_vectors = init_capacity * 2 * dim * sizeof(V);
+  test_reserve_basic(dim, key_num, init_capacity, max_capacity,
+                     max_hbm_for_vectors);
+}
+
+void test_reserve_with_defragmentation(size_t dim, size_t key_num,
+                                       size_t init_capacity,
+                                       size_t max_capacity,
+                                       size_t max_hbm_for_vectors) {
+  // 1. 初始化
+  init_env();
+
+  size_t total_mem = 0;
+  size_t free_mem = 0;
+  ASSERT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
+            ACL_ERROR_NONE);
+  ASSERT_GT(free_mem, max_hbm_for_vectors)
+      << "free HBM is not enough free:" << free_mem
+      << "need:" << max_hbm_for_vectors;
+
+  // 2. 建表
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = max_capacity,
+      .max_hbm_for_vectors = max_hbm_for_vectors,
+      .dim = dim,
+      .max_load_factor = numeric_limits<float>::max(),
+  };
+  using Table = HashTable<K, V>;
+
+  Table table;
+  table.init(options);
+  EXPECT_EQ(table.size(), 0);
+
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+
+  // 3. 使用DeviceData管理设备内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  // 4. 插值
+  // 4.1 生产连续值
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num);
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
+
+  // 4.2 插值
+  uint32_t add_time = key_num / init_capacity;
+  for (uint32_t i = 0; i < add_time; i++) {
+    table.insert_or_assign(init_capacity,
+                           device_data.device_keys + i * init_capacity,
+                           device_data.device_values + i * init_capacity * dim,
+                           nullptr, device_data.stream);
+  }
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(device_data.stream), init_capacity);
+
+  // 5. 验证reserve
+  auto cur_capacity = table.capacity();
+  auto load_factor = table.load_factor(device_data.stream);
+  EXPECT_EQ(cur_capacity, init_capacity);
+  EXPECT_EQ(load_factor, 1.0f);
+  // 5.1 按2倍扩容
+  table.reserve(cur_capacity + 1, device_data.stream);
   cur_capacity = table.capacity();
-  load_factor = table.load_factor(stream);
-  EXPECT_EQ(cur_capacity, max_capacity);
-  EXPECT_EQ(load_factor, (key_num * 1.0) / (max_capacity * 1.0));
-  EXPECT_EQ(table.size(stream), key_num);
+  load_factor = table.load_factor(device_data.stream);
+  EXPECT_EQ(cur_capacity, init_capacity * 2);
+  EXPECT_EQ(load_factor, 0.5f);
+  EXPECT_EQ(table.size(device_data.stream), init_capacity);
 
   // 6. 校验扩容后，value不变
-  table.find(key_num, device_keys, device_values_ptr, device_found,
-             nullptr, stream);
-  ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
+  table.find(key_num, device_data.device_keys, device_data.device_values_ptr,
+             device_data.device_found, nullptr, device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 
   bool* host_found = nullptr;
   ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
                             key_num * sizeof(bool)),
             ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtMemcpy(host_found, key_num * sizeof(bool), device_found,
-                        key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
-            ACL_ERROR_NONE);
+  ASSERT_EQ(
+      aclrtMemcpy(host_found, key_num * sizeof(bool), device_data.device_found,
+                  key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
+      ACL_ERROR_NONE);
   vector<void*> real_values_ptr(key_num, nullptr);
   ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*),
-                        device_values_ptr, key_num * sizeof(void*),
+                        device_data.device_values_ptr, key_num * sizeof(void*),
                         ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
   size_t found_num = 0;
@@ -166,26 +279,42 @@ TEST(test_reserve, test_reserve_all_hbm) {
       found_num++;
 
       vector<V> real_values(dim, 0);
-      ASSERT_EQ(aclrtMemcpy(real_values.data(), dim * each_value_size,
-                            real_values_ptr[i], dim * each_value_size,
-                            ACL_MEMCPY_DEVICE_TO_HOST),
-                ACL_ERROR_NONE);
+      ASSERT_EQ(
+          aclrtMemcpy(real_values.data(), dim * device_data.each_value_size,
+                      real_values_ptr[i], dim * device_data.each_value_size,
+                      ACL_MEMCPY_DEVICE_TO_HOST),
+          ACL_ERROR_NONE);
       vector<V> expect_values(host_values.begin() + i * dim,
                               host_values.begin() + i * dim + dim);
-      EXPECT_EQ(expect_values, real_values);
+      ASSERT_EQ(expect_values, real_values);
     } else {
       EXPECT_EQ(real_values_ptr[i], nullptr);
     }
   }
-  EXPECT_EQ(found_num, key_num);
+  EXPECT_EQ(found_num, init_capacity);
 
-  table.clear(stream);
-  EXPECT_EQ(table.size(stream), 0);
-
-  ASSERT_EQ(aclrtFree(device_keys), ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtFree(device_values), ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtFree(device_values_ptr), ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtFree(device_found), ACL_ERROR_NONE);
+  table.clear(device_data.stream);
+  EXPECT_EQ(table.size(device_data.stream), 0);
 
   ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+}
+
+TEST(test_reserve, test_reserve_all_hbm_with_defragmentation) {
+  constexpr size_t dim = 8;
+  constexpr size_t init_capacity = 128UL * 1024;
+  constexpr size_t max_capacity = init_capacity * 128;
+  constexpr size_t key_num = max_capacity * 2;
+  constexpr size_t hbm_for_values = 1UL << 30;
+  test_reserve_with_defragmentation(dim, key_num, init_capacity, max_capacity,
+                                    hbm_for_values);
+}
+
+TEST(test_reserve, test_reserve_to_ddr_with_defragmentation) {
+  constexpr size_t dim = 8;
+  constexpr size_t init_capacity = 128UL * 1024;
+  constexpr size_t max_capacity = init_capacity * 128;
+  constexpr size_t key_num = max_capacity * 2;
+  size_t max_hbm_for_vectors = init_capacity * dim * sizeof(V);
+  test_reserve_with_defragmentation(dim, key_num, init_capacity, max_capacity,
+                                    max_hbm_for_vectors);
 }
