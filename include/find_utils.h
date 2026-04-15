@@ -28,7 +28,7 @@ namespace npu {
 namespace hkv {
 
 template <class K, class V, class S>
-__forceinline__ __device__ OccupyResult find_without_lock(
+__forceinline__ __simt_callee__ OccupyResult find_without_lock(
     __gm__ Bucket<K, V, S>* __restrict__ bucket,
     const K desired_key,
     uint32_t key_pos,
@@ -94,7 +94,7 @@ __forceinline__ __device__ OccupyResult find_without_lock(
  * original key at that position (meaningful for EVICT).
  */
 template <typename K, typename S, int32_t TILE_SIZE = 32>
-__forceinline__ __device__ OccupyResult find_and_lock(
+__forceinline__ __simt_callee__ OccupyResult find_and_lock(
     __gm__ K* bucket_keys, __gm__ S* bucket_scores,
     const uint32_t bucket_max_size, const K& key, const S& score,
     uint32_t& key_pos, K& evicted_key, const uint32_t lane_id) {

@@ -17,7 +17,6 @@
 #pragma once
 
 #include <cstdint>
-#include "../include/cuda2npu.h"
 #include "../include/types.h"
 
 template <typename K, typename V, typename S>
@@ -26,7 +25,7 @@ struct ForEachExecutionFunc {
   uint32_t dim;
   K target_key;
 
-  __device__ void operator()(const K& key, __gm__ V* value, __gm__ S*,
+  __simt_callee__ void operator()(const K& key, __gm__ V* value, __gm__ S*,
                              int32_t) {
     if (key == target_key) {
       for (uint32_t i = 0; i < dim; ++i) {
@@ -41,7 +40,7 @@ struct ForEachScoresFilterFunc {
   __gm__ uint64_t* count;
   S threshold;
 
-  __device__ void operator()(const K& key, __gm__ V*, __gm__ S* score,
+  __simt_callee__ void operator()(const K& key, __gm__ V*, __gm__ S* score,
                              int32_t) {
     S score_val = *score;
     bool match = (!npu::hkv::IS_RESERVED_KEY(key) && score_val >= threshold);
@@ -55,7 +54,7 @@ struct ForEachScoresFilterFunc {
 
 template <class K, class S>
 struct EraseIfPredFunctor {
-  __forceinline__ __device__ bool operator()(const K& key, S& score,
+  __forceinline__ __simt_callee__ bool operator()(const K& key, S& score,
                                              const K& pattern,
                                              const S& threshold) {
     return (((key & 0x7f) > pattern) && (score > threshold));
@@ -69,7 +68,7 @@ struct EraseIfPredFunctorV2 {
   EraseIfPredFunctorV2(K pattern, S threshold)
       : pattern(pattern), threshold(threshold) {}
 
-  __forceinline__ __device__ bool operator()(const K& key,
+  __forceinline__ __simt_callee__ bool operator()(const K& key,
                                              const __gm__ V* value,
                                              const S& score,
                                              int32_t group_size) {

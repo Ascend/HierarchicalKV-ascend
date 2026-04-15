@@ -172,7 +172,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
 }
 
 template <typename V, int32_t TILE_SIZE>
-__forceinline__ __device__ void copy_vector(__gm__ const V* src, __gm__ V* dst,
+__forceinline__ __simt_callee__ void copy_vector(__gm__ const V* src, __gm__ V* dst,
                                             const uint32_t dim,
                                             const uint32_t lane_id) {
   for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {

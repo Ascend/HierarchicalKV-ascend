@@ -27,7 +27,7 @@ namespace hkv {
 using namespace AscendC;
 
 template <class K, class V, class S, bool IS_FAST_MODE>
-__inline__ __device__ void copy_key_to_new_bucket(
+__inline__ __simt_callee__ void copy_key_to_new_bucket(
     const K& key, const S& score, __gm__ V* __restrict__ vector,
     __gm__ Bucket<K, V, S>* __restrict__ new_bucket,
     __gm__ int32_t* __restrict__ new_bucket_size, const uint32_t& new_key_pos,
@@ -74,7 +74,7 @@ __inline__ __device__ void copy_key_to_new_bucket(
  * []与|位置替换后，由*->|的距离缩小
  */
 template <class K, class V, class S, bool IS_FAST_MODE>
-__inline__ __device__ void defragmentation_for_rehash(
+__inline__ __simt_callee__ void defragmentation_for_rehash(
     __gm__ Bucket<K, V, S>* __restrict__ cur_bucket, uint64_t move_pos_offset,
     uint32_t remove_pos, const uint32_t& bucket_max_size,
     const size_t& old_buckets_num, const uint32_t& dim,

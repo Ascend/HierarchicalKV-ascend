@@ -19,7 +19,6 @@
 
 #include <kernel_operator.h>
 #include <cstdint>
-#include "cuda2npu.h"
 #include "types.h"
 #include "utils.h"
 
@@ -34,12 +33,12 @@ constexpr uint64_t SCORE_32BIT_MAX = UINT64_C(0xFFFFFFFF);
 static constexpr int32_t RSHIFT_ON_NANO = 20;
 
 template <class S>
-__forceinline__ __device__ S make_epoch(const S& epoch) {
+__forceinline__ __simt_callee__ S make_epoch(const S& epoch) {
   return epoch << EPOCH_BITS;
 }
 
 template <class S>
-__forceinline__ __device__ S make_nano(const S& cycle) {
+__forceinline__ __simt_callee__ S make_nano(const S& cycle) {
   return (SCORE_BITS_MASK & (cycle >> RSHIFT_ON_NANO));
 }
 
@@ -50,13 +49,13 @@ template <class K, class V, class S>
 struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLru> {
   using BUCKET = Bucket<K, V, S>;
 
-  __forceinline__ __device__ static S desired_when_missed(
+  __forceinline__ __simt_callee__ static S desired_when_missed(
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
     return cur_cycle;
   }
 
-  __forceinline__ __device__ static void update(
+  __forceinline__ __simt_callee__ static void update(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& desired_score_when_missed, const bool new_insert) {
@@ -64,7 +63,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLru> {
     (void)Simt::AtomicExch(scores_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_with_digest(
+  __forceinline__ __simt_callee__ static void update_with_digest(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -80,7 +79,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLru> {
         dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_score_only(
+  __forceinline__ __simt_callee__ static void update_score_only(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -92,7 +91,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLru> {
           dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
@@ -100,7 +99,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLru> {
     (void)Simt::AtomicExch(scores_ptr, cur_cycle);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ K* bucket_keys_ptr, const uint32_t bucket_capacity,
       const uint32_t key_pos, __gm__ const S* __restrict const input_scores,
       const int32_t key_idx, const S& epoch, const S& cur_cycle) {
@@ -116,13 +115,13 @@ template <class K, class V, class S>
 struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLfu> {
   using BUCKET = Bucket<K, V, S>;
 
-  __forceinline__ __device__ static S desired_when_missed(
+  __forceinline__ __simt_callee__ static S desired_when_missed(
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
     return static_cast<S>(MAX_SCORE);
   }
 
-  __forceinline__ __device__ static void update(
+  __forceinline__ __simt_callee__ static void update(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& desired_score_when_missed, const bool new_insert) {
@@ -137,7 +136,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLfu> {
     }
   }
 
-  __forceinline__ __device__ static void update_with_digest(
+  __forceinline__ __simt_callee__ static void update_with_digest(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -163,7 +162,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLfu> {
     }
   }
 
-  __forceinline__ __device__ static void update_score_only(
+  __forceinline__ __simt_callee__ static void update_score_only(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -185,7 +184,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLfu> {
     }
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
@@ -196,7 +195,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kLfu> {
     (void)Simt::AtomicAdd(scores_ptr, input_scores[key_idx]);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ K* bucket_keys_ptr, const uint32_t bucket_capacity,
       const uint32_t key_pos, __gm__ const S* __restrict const input_scores,
       const int32_t key_idx, const S& epoch, const S& cur_cycle) {
@@ -215,7 +214,7 @@ template <class K, class V, class S>
 struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
   using BUCKET = Bucket<K, V, S>;
 
-  __forceinline__ __device__ static S desired_when_missed(
+  __forceinline__ __simt_callee__ static S desired_when_missed(
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
     if (epoch == static_cast<S>(IGNORED_GLOBAL_EPOCH) &&
@@ -225,7 +224,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
     return make_epoch<S>(epoch) | make_nano<S>(cur_cycle);
   }
 
-  __forceinline__ __device__ static void update(
+  __forceinline__ __simt_callee__ static void update(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& desired_score_when_missed, const bool new_insert) {
@@ -233,7 +232,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
     (void)Simt::AtomicExch(scores_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_with_digest(
+  __forceinline__ __simt_callee__ static void update_with_digest(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -249,7 +248,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
         dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_score_only(
+  __forceinline__ __simt_callee__ static void update_score_only(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -261,7 +260,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
         dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
@@ -270,7 +269,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLru> {
                            make_epoch<S>(epoch) | make_nano<S>(cur_cycle));
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ K* bucket_keys_ptr, const uint32_t bucket_capacity,
       const uint32_t key_pos, __gm__ const S* __restrict const input_scores,
       const int32_t key_idx, const S& epoch, const S& cur_cycle) {
@@ -286,7 +285,7 @@ template <class K, class V, class S>
 struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
   using BUCKET = Bucket<K, V, S>;
 
-  __forceinline__ __device__ static S desired_when_missed(
+  __forceinline__ __simt_callee__ static S desired_when_missed(
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
     if (epoch == static_cast<S>(IGNORED_GLOBAL_EPOCH)) {
@@ -295,7 +294,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
     return make_epoch<S>(epoch) | (input_scores[key_idx] & SCORE_BITS_MASK);
   }
 
-  __forceinline__ __device__ static void update(
+  __forceinline__ __simt_callee__ static void update(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& desired_score_when_missed, const bool new_insert) {
@@ -314,7 +313,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
     (void)Simt::AtomicExch(scores_ptr, new_score);
   }
 
-  __forceinline__ __device__ static void update_with_digest(
+  __forceinline__ __simt_callee__ static void update_with_digest(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -341,7 +340,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
         dst_score_ptr, new_score);
   }
 
-  __forceinline__ __device__ static void update_score_only(
+  __forceinline__ __simt_callee__ static void update_score_only(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -364,7 +363,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
         dst_score_ptr, new_score);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
@@ -383,7 +382,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kEpochLfu> {
     (void)Simt::AtomicExch(scores_ptr, new_score);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ K* bucket_keys_ptr, const uint32_t bucket_capacity,
       const uint32_t key_pos, __gm__ const S* __restrict const input_scores,
       const int32_t key_idx, const S& epoch, const S& cur_cycle) {
@@ -410,13 +409,13 @@ template <class K, class V, class S>
 struct ScoreFunctor<K, V, S, EvictStrategyInternal::kCustomized> {
   using BUCKET = Bucket<K, V, S>;
 
-  __forceinline__ __device__ static S desired_when_missed(
+  __forceinline__ __simt_callee__ static S desired_when_missed(
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
     return input_scores[key_idx];
   }
 
-  __forceinline__ __device__ static void update(
+  __forceinline__ __simt_callee__ static void update(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& desired_score_when_missed, const bool new_insert) {
@@ -424,7 +423,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kCustomized> {
     (void)Simt::AtomicExch(scores_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_with_digest(
+  __forceinline__ __simt_callee__ static void update_with_digest(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -440,7 +439,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kCustomized> {
         dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_score_only(
+  __forceinline__ __simt_callee__ static void update_score_only(
       __gm__ K* __restrict bucket_key_ptr, const uint32_t& key_pos,
       __gm__ const S* __restrict const input_scores, const uint32_t& key_idx,
       const S& desired_score_when_missed, const uint32_t& bucket_capacity,
@@ -452,7 +451,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kCustomized> {
         dst_score_ptr, desired_score_when_missed);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ BUCKET* __restrict bucket, const int32_t key_pos,
       __gm__ const S* __restrict const input_scores, const int32_t key_idx,
       const S& epoch, const S& cur_cycle) {
@@ -463,7 +462,7 @@ struct ScoreFunctor<K, V, S, EvictStrategyInternal::kCustomized> {
     (void)Simt::AtomicExch(scores_ptr, input_scores[key_idx]);
   }
 
-  __forceinline__ __device__ static void update_without_missed(
+  __forceinline__ __simt_callee__ static void update_without_missed(
       __gm__ K* bucket_keys_ptr, const uint32_t bucket_capacity,
       const uint32_t key_pos, __gm__ const S* __restrict const input_scores,
       const int32_t key_idx, const S& epoch, const S& cur_cycle) {

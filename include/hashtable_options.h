@@ -56,7 +56,7 @@ struct HashTableOptions {
   int reserved_key_start_bit = 0;       ///< The binary index of reserved key.
   size_t num_of_buckets_per_alloc = 1;  ///< Number of buckets allocated in each
                                         ///< HBM allocation, must be power of 2.
-  bool api_lock = true;  ///<  The flag indicating whether to lock the table
+  bool api_lock = false;  ///<  The flag indicating whether to lock the table
                          ///<  once enters the API.
   MemoryPoolOptions
       device_memory_pool;  ///< Configuration options for device memory pool.

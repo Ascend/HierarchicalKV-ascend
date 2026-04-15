@@ -35,7 +35,7 @@ using namespace AscendC;
  * dim is the original dimension in V elements.
  */
 template <typename V, int32_t TILE_SIZE>
-__forceinline__ __device__ void accum_or_assign_vector(
+__forceinline__ __simt_callee__ void accum_or_assign_vector(
     __gm__ const V* src, __gm__ V* dst,
     const bool is_accum, const uint32_t dim, const uint32_t lane_id) {
   for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {

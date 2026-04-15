@@ -42,7 +42,7 @@ struct ExportTestConfig {
 
 template <class K, class S>
 struct ExportIfPredFunctor {
-  __forceinline__ __device__ bool operator()(const K& key, const S& score,
+  __forceinline__ __simt_callee__ bool operator()(const K& key, const S& score,
                                              const K& pattern,
                                              const S& threshold) {
     return score >= threshold;
@@ -56,7 +56,7 @@ struct ExportIfPredFunctorV2 {
   ExportIfPredFunctorV2(K pattern, S threshold)
       : pattern(pattern), threshold(threshold) {}
   template <int GroupSize>
-  __forceinline__ __device__ bool operator()(
+  __forceinline__ __simt_callee__ bool operator()(
       const K& key, const __gm__ V* value, const S& score) {
     /* evaluate key, score and value. */
     return ((!IS_RESERVED_KEY<K>(key)) && (score < threshold));

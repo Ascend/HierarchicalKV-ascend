@@ -28,7 +28,7 @@ namespace npu {
 namespace hkv {
 using namespace AscendC;
 template <typename VecV, int32_t TILE_SIZE>
-__forceinline__ __device__ void copy_value(
+__forceinline__ __simt_callee__ void copy_value(
     __gm__ const VecV* src, __gm__ VecV* dst,
     const uint32_t dim, const uint32_t lane_id) {
   for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {

@@ -188,6 +188,85 @@ TEST_F(GroupSharedMutexTest, AdvancedFunctionalityMultiStream) {
   EXPECT_TRUE(multiple_read.load());
 }
 
+TEST_F(GroupSharedMutexTest, AdvancedFunctionalitySingleStream) {
+  group_shared_mutex mutex;
+  std::atomic<bool> multiple_read{false};
+  std::atomic<bool> multiple_update{false};
+
+  // Get device from test environment
+  auto device_id_env = std::getenv("HKV_TEST_DEVICE");
+  int32_t device_id = 0;
+  try {
+    device_id = (device_id_env != nullptr) ? std::stoi(device_id_env) : 0;
+  } catch (...) {
+    device_id = 0;
+    std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0"
+              << std::endl;
+  }
+
+  // Test multiple reads
+  std::vector<std::thread> reads;
+  for (int i = 0; i < 50; ++i) {
+    reads.emplace_back([&]() {
+      NPU_CHECK(aclrtSetDevice(device_id));
+      {
+        read_shared_lock read(mutex);
+        EXPECT_TRUE(mutex.read_count() > 0);
+        if (mutex.read_count() > 1) multiple_read.store(true);
+        std::this_thread::sleep_for(1000ms);
+        ASSERT_EQ(mutex.update_count(), 0);
+      }
+      NPU_CHECK(aclrtResetDevice(device_id));
+    });
+  }
+
+  // Test multiple updates
+  std::vector<std::thread> updates;
+  for (int i = 0; i < 50; ++i) {
+    updates.emplace_back([&]() {
+      NPU_CHECK(aclrtSetDevice(device_id));
+      {
+        update_shared_lock update(mutex);
+        EXPECT_TRUE(mutex.update_count() > 0);
+        if (mutex.update_count() > 1) multiple_update.store(true);
+        std::this_thread::sleep_for(1000ms);
+        ASSERT_EQ(mutex.read_count(), 0);
+      }
+      NPU_CHECK(aclrtResetDevice(device_id));
+    });
+  }
+
+  // Test multiple uniques
+  std::vector<std::thread> uniques;
+  for (int i = 0; i < 50; ++i) {
+    uniques.emplace_back([&]() {
+      NPU_CHECK(aclrtSetDevice(device_id));
+      {
+        update_read_lock unique(mutex);
+        ASSERT_EQ(mutex.read_count(), 1);
+        ASSERT_EQ(mutex.update_count(), 1);
+        std::this_thread::sleep_for(100ms);
+      }
+      NPU_CHECK(aclrtResetDevice(device_id));
+    });
+  }
+
+  for (auto& th : reads) {
+    th.join();
+  }
+
+  for (auto& th : updates) {
+    th.join();
+  }
+
+  for (auto& th : uniques) {
+    th.join();
+  }
+
+  EXPECT_TRUE(multiple_update.load());
+  EXPECT_TRUE(multiple_read.load());
+}
+
 TEST_F(GroupSharedMutexTest, LockExclusivity) {
   group_shared_mutex mutex;
   std::atomic<bool> read_held{false};
