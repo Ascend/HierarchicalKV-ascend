@@ -57,6 +57,7 @@
 #include "../hkv_hashtable/assign_values_kernel/assign_values_kernel.h"
 #include "../hkv_hashtable/assign_kernel/assign_kernel.h"
 #include "../hkv_hashtable/accum_or_assign_kernel/accum_or_assign_kernel.h"
+#include "../hkv_hashtable/accum_or_assign_kernel/accum_or_assign_kernel_hybrid.h"
 #include "aclnn_helper.h"
 #include "aclnnop/aclnn_reduce_sum.h"
 #include "group_lock.h"
@@ -1378,8 +1379,8 @@ class HashTable : public HashTableBase<K, V, S> {
                        const score_type* scores = nullptr,  // (n)
                        aclrtStream stream = 0,
                        bool ignore_evict_strategy = false) {
-    if constexpr (std::is_same<value_type, double>::value) {
-      throw std::runtime_error("[accum_or_assign] Does not support double value_type.");
+    if constexpr (std::is_same<value_type, double>::value || std::is_same<value_type, uint16_t>::value) {
+      throw std::runtime_error("[accum_or_assign] Does not support double or uint16_t value_type.");
     } else {
       if (n == 0) {
         return;
@@ -1409,7 +1410,30 @@ class HashTable : public HashTableBase<K, V, S> {
             table_->max_bucket_shift, table_->capacity_divisor_magic,
             table_->capacity_divisor_shift);
       } else {
-        throw std::runtime_error("[accum_or_assign] Does not support non-fast mode.");
+        size_t size_all = n * sizeof(value_type*) + n * sizeof(bool);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        bool* d_accum_or_assigns{
+            reinterpret_cast<bool*>(temp_storage + n * sizeof(value_type*))};
+
+        accum_or_assign_lock_key_hybrid_kernel<K, V, S, evict_strategy>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->buckets_size,
+                table_->capacity, table_->bucket_max_size, table_->dim,
+                keys, accum_or_assigns, scores,
+                n, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift,
+                d_dst_values, d_accum_or_assigns);
+
+        auto tiling =
+            GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), TRIPLE_BUFFER * DOUBLE_BUFFER);
+        write_with_accum_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+            tiling.former_num, tiling.former_core_move_num,
+            tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+            table_->dim, const_cast<value_type*>(value_or_deltas), n,
+            d_dst_values, d_accum_or_assigns);
       }
 
       NpuCheckError();

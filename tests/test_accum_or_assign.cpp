@@ -1357,6 +1357,147 @@ void test_rehash() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
+// hybrid模式（HBM+HMEM）下 accum_or_assign SIMD value-copy 测试
+// capacity=128, max_hbm_for_vectors 仅容纳一半 value，
+// 插入 key_num=1024 >> capacity，确保表满且部分 value 落在 host 内存。
+// Phase 1: 验证 ASSIGN — 全部 accum_or_assigns=false
+// Phase 2: 验证 ACCUM  — 全部 accum_or_assigns=true，值应变为 2 倍
+static void test_accum_or_assign_hybrid_dim(size_t dim) {
+  init_env();
+  SCOPED_TRACE(::testing::Message() << "dim = " << dim);
+
+  constexpr size_t capacity = 128UL;
+  constexpr size_t key_num = 100;
+
+  TableOptions options;
+  options.init_capacity = capacity;
+  options.max_capacity = capacity;
+  options.max_hbm_for_vectors = capacity * sizeof(V) * dim / 2;
+  options.dim = dim;
+
+  using Table = HashTable<K, V, S>;
+  auto table = make_table<Table>(options);
+  ASSERT_EQ(table->size(), 0);
+
+  vector<K> host_keys(key_num);
+  vector<V> host_values(key_num * dim);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(),
+                                  static_cast<S*>(nullptr),
+                                  host_values.data(), key_num, 1);
+
+  auto d_keys = DeviceMem::Alloc(key_num * sizeof(K));
+  auto d_values = DeviceMem::Alloc(key_num * sizeof(V) * dim);
+  auto d_accum = DeviceMem::Alloc(key_num * sizeof(bool));
+  auto d_found = DeviceMem::Alloc(key_num * sizeof(bool));
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), key_num * sizeof(K),
+                        host_keys.data(), key_num * sizeof(K),
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+
+  // ---- Phase 1: ASSIGN (accum_or_assigns 全 false) ----
+  ACL_CHECK(aclrtMemcpy(d_values.as<V>(), key_num * sizeof(V) * dim,
+                        host_values.data(), key_num * sizeof(V) * dim,
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_accum.ptr, key_num * sizeof(bool), 0,
+                        key_num * sizeof(bool)));
+
+  table->accum_or_assign(key_num, d_keys.as<K>(), d_values.as<V>(),
+                         d_accum.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t table_size = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  EXPECT_EQ(table_size, key_num);
+
+  // 验证 ASSIGN: find 回读 value 应与原始一致
+  ACL_CHECK(aclrtMemset(d_values.ptr, key_num * sizeof(V) * dim, 0,
+                        key_num * sizeof(V) * dim));
+
+  table->find(key_num, d_keys.as<K>(), d_values.as<V>(),
+              d_found.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  bool* host_found = nullptr;
+  ACL_CHECK(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                            key_num * sizeof(bool)));
+  ACL_CHECK(aclrtMemcpy(host_found, key_num * sizeof(bool),
+                        d_found.as<bool>(), key_num * sizeof(bool),
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  vector<V> result_values(key_num * dim);
+  ACL_CHECK(aclrtMemcpy(result_values.data(), key_num * dim * sizeof(V),
+                        d_values.as<V>(), key_num * dim * sizeof(V),
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  size_t found_num = 0;
+  for (size_t i = 0; i < key_num; i++) {
+    if (host_found[i]) {
+      found_num++;
+      for (size_t j = 0; j < dim; j++) {
+        EXPECT_EQ(result_values[i * dim + j], host_values[i * dim + j])
+            << "ASSIGN: key=" << host_keys[i] << " dim_idx=" << j;
+      }
+    }
+  }
+  EXPECT_EQ(found_num, key_num);
+
+  // ---- Phase 2: ACCUM (accum_or_assigns 全 true) ----
+  ACL_CHECK(aclrtMemcpy(d_values.as<V>(), key_num * sizeof(V) * dim,
+                        host_values.data(), key_num * sizeof(V) * dim,
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_accum.ptr, key_num * sizeof(bool), 1,
+                        key_num * sizeof(bool)));
+
+  table->accum_or_assign(key_num, d_keys.as<K>(), d_values.as<V>(),
+                         d_accum.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table_size = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  EXPECT_EQ(table_size, key_num);
+
+  // 验证 ACCUM: find 回读 value 应为原始值的 2 倍
+  ACL_CHECK(aclrtMemset(d_values.ptr, key_num * sizeof(V) * dim, 0,
+                        key_num * sizeof(V) * dim));
+
+  table->find(key_num, d_keys.as<K>(), d_values.as<V>(),
+              d_found.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  ACL_CHECK(aclrtMemcpy(result_values.data(), key_num * dim * sizeof(V),
+                        d_values.as<V>(), key_num * dim * sizeof(V),
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(host_found, key_num * sizeof(bool),
+                        d_found.as<bool>(), key_num * sizeof(bool),
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  found_num = 0;
+  for (size_t i = 0; i < key_num; i++) {
+    if (host_found[i]) {
+      found_num++;
+      for (size_t j = 0; j < dim; j++) {
+        EXPECT_FLOAT_EQ(result_values[i * dim + j],
+                        host_values[i * dim + j] * 2)
+            << "ACCUM: key=" << host_keys[i] << " dim_idx=" << j;
+      }
+    }
+  }
+  EXPECT_EQ(found_num, key_num);
+
+  ACL_CHECK(aclrtFreeHost(host_found));
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
+TEST(AccumOrAssignTest, HybridMode_Dim8) {
+  test_accum_or_assign_hybrid_dim(8);
+}
+TEST(AccumOrAssignTest, HybridMode_Dim1024) {
+  test_accum_or_assign_hybrid_dim(1024);
+}
+
 TEST(AccumOrAssignTest, test_evict_strategy_lru_basic) {
   test_evict_strategy_lru_basic();
 }
