@@ -21,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
@@ -74,7 +75,125 @@ struct DeviceMem {
   }
 };
 
-void test_evict_strategy_lru_basic() {
+template <class K, class S>
+struct AccumOrAssignEraseIfPredFunctor {
+  __forceinline__ __simt_callee__ bool operator()(const K& key, S& score,
+                                             const K& pattern,
+                                             const S& threshold) {
+    (void)pattern;
+    return (((key & 0x1u) == 0x1u) && (score > threshold));
+  }
+};
+
+template <class K, class S>
+struct AccumOrAssignExportIfPredFunctor {
+  __forceinline__ __simt_callee__ bool operator()(const K& key, const S& score,
+                                             const K& pattern,
+                                             const S& threshold) {
+    (void)key;
+    (void)pattern;
+    return score > threshold;
+  }
+};
+
+template <typename Table, size_t dim>
+void CheckAccumOrAssignValues(Table* table, const vector<K>& batch_keys,
+                              DeviceMem& d_keys, DeviceMem& d_values,
+                              size_t len, aclrtStream stream) {
+  unordered_set<K> current_batch(batch_keys.begin(), batch_keys.end());
+  unordered_map<K, V> values_before_insert;
+
+  size_t table_size_before = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t cap = table_size_before + len;
+  auto d_found_or_accum = DeviceMem::Alloc(len * sizeof(bool));
+  auto d_tmp_keys = DeviceMem::Alloc(cap * sizeof(K));
+  auto d_tmp_values = DeviceMem::Alloc(cap * sizeof(V) * dim);
+
+  ACL_CHECK(aclrtMemset(d_found_or_accum.ptr, len * sizeof(bool), 0,
+                        len * sizeof(bool)));
+  ACL_CHECK(aclrtMemset(d_tmp_keys.ptr, cap * sizeof(K), 0, cap * sizeof(K)));
+  ACL_CHECK(aclrtMemset(d_tmp_values.ptr, cap * sizeof(V) * dim, 0,
+                        cap * sizeof(V) * dim));
+
+  table->find(len, d_keys.as<K>(), d_tmp_values.as<V>(),
+              d_found_or_accum.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t table_size_verify0 =
+      table->export_batch(table->capacity(), 0, d_tmp_keys.as<K>(),
+                          d_tmp_values.as<V>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(table_size_before, table_size_verify0);
+
+  vector<K> h_tmp_keys(cap);
+  vector<V> h_tmp_values(cap * dim);
+  if (table_size_before > 0) {
+    ACL_CHECK(aclrtMemcpy(h_tmp_keys.data(), table_size_before * sizeof(K),
+                          d_tmp_keys.as<K>(), table_size_before * sizeof(K),
+                          ACL_MEMCPY_DEVICE_TO_HOST));
+    ACL_CHECK(aclrtMemcpy(h_tmp_values.data(),
+                          table_size_before * sizeof(V) * dim,
+                          d_tmp_values.as<V>(),
+                          table_size_before * sizeof(V) * dim,
+                          ACL_MEMCPY_DEVICE_TO_HOST));
+  }
+
+  for (size_t i = 0; i < table_size_before; i++) {
+    values_before_insert[h_tmp_keys[i]] = h_tmp_values[i * dim];
+  }
+
+  table->accum_or_assign(len, d_keys.as<K>(), d_values.as<V>(),
+                         d_found_or_accum.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t table_size_after = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  size_t table_size_verify1 =
+      table->export_batch(table->capacity(), 0, d_tmp_keys.as<K>(),
+                          d_tmp_values.as<V>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(table_size_after, table_size_verify1);
+
+  if (table_size_after > 0) {
+    ACL_CHECK(aclrtMemcpy(h_tmp_keys.data(), table_size_after * sizeof(K),
+                          d_tmp_keys.as<K>(), table_size_after * sizeof(K),
+                          ACL_MEMCPY_DEVICE_TO_HOST));
+    ACL_CHECK(aclrtMemcpy(h_tmp_values.data(), table_size_after * sizeof(V) * dim,
+                          d_tmp_values.as<V>(),
+                          table_size_after * sizeof(V) * dim,
+                          ACL_MEMCPY_DEVICE_TO_HOST));
+  }
+
+  size_t value_diff_cnt = 0;
+  for (size_t i = 0; i < table_size_after; i++) {
+    const K key = h_tmp_keys[i];
+    const auto before_it = values_before_insert.find(key);
+    const bool existed = before_it != values_before_insert.end();
+    const bool required = current_batch.find(key) != current_batch.end();
+    V expected_value = 0;
+
+    if (existed) {
+      expected_value =
+          required ? (before_it->second + static_cast<V>(key * 0.00001))
+                   : before_it->second;
+    } else if (required) {
+      expected_value = static_cast<V>(key * 0.00001);
+    }
+
+    for (size_t j = 0; j < dim; j++) {
+      if (h_tmp_values[i * dim + j] != expected_value) {
+        ++value_diff_cnt;
+        break;
+      }
+    }
+  }
+
+  ASSERT_EQ(value_diff_cnt, 0);
+}
+
+void test_evict_strategy_lru_basic(size_t max_hbm_for_vectors = 16) {
   init_env();
   constexpr uint64_t BUCKET_NUM = 8UL;
   constexpr uint64_t BUCKET_MAX_SIZE = 128UL;
@@ -91,7 +210,7 @@ void test_evict_strategy_lru_basic() {
   options.init_capacity = INIT_CAPACITY;
   options.max_capacity = MAX_CAPACITY;
   options.dim = DIM;
-  options.max_hbm_for_vectors = GB(16);
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
   using Table = HashTable<K, V, S, EvictStrategy::kLru>;
 
   vector<K> h_keys_base(BASE_KEY_NUM);
@@ -294,7 +413,8 @@ void test_evict_strategy_lru_basic() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
-void test_evict_strategy_lfu_basic() {
+void test_evict_strategy_lfu_basic(size_t max_hbm_for_vectors = 16,
+                                   int key_start = 0) {
   init_env();
   constexpr uint64_t BUCKET_NUM = 8UL;
   constexpr uint64_t BUCKET_MAX_SIZE = 128UL;
@@ -308,10 +428,11 @@ void test_evict_strategy_lfu_basic() {
   constexpr float true_ratio = 0.5;
 
   TableOptions options;
+  options.reserved_key_start_bit = key_start;
   options.init_capacity = INIT_CAPACITY;
   options.max_capacity = MAX_CAPACITY;
   options.dim = DIM;
-  options.max_hbm_for_vectors = GB(16);
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
   using Table = HashTable<K, V, S, EvictStrategy::kLfu>;
 
   vector<K> h_keys_base(BASE_KEY_NUM);
@@ -513,7 +634,8 @@ void test_evict_strategy_lfu_basic() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
-void test_evict_strategy_epochlru_basic() {
+void test_evict_strategy_epochlru_basic(size_t max_hbm_for_vectors = 16,
+                                        int key_start = 0) {
   init_env();
   constexpr int RSHIFT_ON_NANO = 20;
   constexpr uint64_t BUCKET_NUM = 8UL;
@@ -527,10 +649,11 @@ void test_evict_strategy_epochlru_basic() {
   constexpr uint64_t TEST_TIMES = 128;
   constexpr float true_ratio = 0.5;
   TableOptions options;
+  options.reserved_key_start_bit = key_start;
   options.init_capacity = INIT_CAPACITY;
   options.max_capacity = MAX_CAPACITY;
   options.dim = DIM;
-  options.max_hbm_for_vectors = GB(16);
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
   using Table = HashTable<K, V, S, EvictStrategy::kEpochLru>;
   vector<K> h_keys_base(BASE_KEY_NUM);
   vector<S> h_scores_base(BASE_KEY_NUM);
@@ -707,7 +830,8 @@ void test_evict_strategy_epochlru_basic() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
-void test_evict_strategy_epochlfu_basic() {
+void test_evict_strategy_epochlfu_basic(size_t max_hbm_for_vectors = 16,
+                                        int key_start = 0) {
   init_env();
   constexpr uint64_t BUCKET_NUM = 8UL;
   constexpr uint64_t BUCKET_MAX_SIZE = 128UL;
@@ -720,10 +844,11 @@ void test_evict_strategy_epochlfu_basic() {
   constexpr uint64_t TEST_TIMES = 1024;
   constexpr float true_ratio = 0.5;
   TableOptions options;
+  options.reserved_key_start_bit = key_start;
   options.init_capacity = INIT_CAPACITY;
   options.max_capacity = MAX_CAPACITY;
   options.dim = DIM;
-  options.max_hbm_for_vectors = GB(16);
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
   using Table = HashTable<K, V, S, EvictStrategy::kEpochLfu>;
   vector<K> h_keys_base(BASE_KEY_NUM);
   vector<S> h_scores_base(BASE_KEY_NUM);
@@ -931,7 +1056,8 @@ void test_evict_strategy_epochlfu_basic() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
-void test_evict_strategy_customized_advanced() {
+void test_evict_strategy_customized_advanced(size_t max_hbm_for_vectors = 16,
+                                             int key_start = 0) {
   init_env();
   constexpr uint64_t BUCKET_NUM = 8UL;
   constexpr uint64_t BUCKET_MAX_SIZE = 128UL;
@@ -945,10 +1071,11 @@ void test_evict_strategy_customized_advanced() {
   constexpr float base_true_ratio = 0.0f;
   constexpr float test_true_ratio = 0.5f;
   TableOptions options;
+  options.reserved_key_start_bit = key_start;
   options.init_capacity = INIT_CAPACITY;
   options.max_capacity = MAX_CAPACITY;
   options.dim = DIM;
-  options.max_hbm_for_vectors = GB(16);
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
   using Table = HashTable<K, V, S, EvictStrategy::kCustomized>;
   vector<K> h_keys_base(BASE_KEY_NUM);
   vector<S> h_scores_base(BASE_KEY_NUM);
@@ -1150,6 +1277,273 @@ void test_evict_strategy_customized_advanced() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
+void test_evict_strategy_customized_basic(size_t max_hbm_for_vectors = 16,
+                                          int key_start = 0) {
+  init_env();
+  constexpr uint64_t BUCKET_NUM = 8UL;
+  constexpr uint64_t BUCKET_MAX_SIZE = 128UL;
+  constexpr uint64_t INIT_CAPACITY = BUCKET_NUM * BUCKET_MAX_SIZE;
+  constexpr uint64_t MAX_CAPACITY = INIT_CAPACITY;
+  constexpr uint64_t BASE_KEY_NUM = BUCKET_MAX_SIZE;
+  constexpr uint64_t TEST_KEY_NUM = 128;
+  constexpr uint64_t TEMP_KEY_NUM =
+      (BASE_KEY_NUM > TEST_KEY_NUM) ? BASE_KEY_NUM : TEST_KEY_NUM;
+  constexpr uint64_t TEST_TIMES = 128;
+  constexpr float true_ratio = 0.3f;
+
+  TableOptions options;
+  options.reserved_key_start_bit = key_start;
+  options.init_capacity = INIT_CAPACITY;
+  options.max_capacity = MAX_CAPACITY;
+  options.dim = DIM;
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
+  using Table = HashTable<K, V, S, EvictStrategy::kCustomized>;
+
+  vector<K> h_keys_base(BASE_KEY_NUM);
+  vector<S> h_scores_base(BASE_KEY_NUM);
+  vector<V> h_vectors_base(BASE_KEY_NUM * DIM);
+  vector<uint8_t> h_accum_or_assigns_base(BASE_KEY_NUM);
+
+  vector<K> h_keys_test(TEST_KEY_NUM);
+  vector<S> h_scores_test(TEST_KEY_NUM);
+  vector<V> h_vectors_test(TEST_KEY_NUM * DIM);
+  vector<uint8_t> h_accum_or_assigns_test(TEST_KEY_NUM);
+
+  vector<K> h_keys_temp(TEMP_KEY_NUM);
+  vector<S> h_scores_temp(TEMP_KEY_NUM);
+  vector<V> h_vectors_temp(TEMP_KEY_NUM * DIM);
+  vector<uint8_t> h_found_temp(TEMP_KEY_NUM);
+
+  auto d_keys = DeviceMem::Alloc(TEMP_KEY_NUM * sizeof(K));
+  auto d_scores = DeviceMem::Alloc(TEMP_KEY_NUM * sizeof(S));
+  auto d_vectors = DeviceMem::Alloc(TEMP_KEY_NUM * sizeof(V) * DIM);
+  auto d_accum_or_assigns = DeviceMem::Alloc(TEMP_KEY_NUM * sizeof(bool));
+  auto d_found = DeviceMem::Alloc(TEMP_KEY_NUM * sizeof(bool));
+
+  create_random_bools<K>(
+      reinterpret_cast<bool*>(h_accum_or_assigns_base.data()), BASE_KEY_NUM,
+      true_ratio);
+  create_random_bools<K>(
+      reinterpret_cast<bool*>(h_accum_or_assigns_test.data()), TEST_KEY_NUM,
+      true_ratio);
+
+  create_keys_in_one_buckets<K, S, V, DIM>(
+      h_keys_base.data(), h_scores_base.data(), h_vectors_base.data(),
+      BASE_KEY_NUM, INIT_CAPACITY, BUCKET_MAX_SIZE, 1, 0,
+      0x3FFFFFFFFFFFFFFF);
+
+  const S base_score_start = 1000;
+  for (size_t i = 0; i < BASE_KEY_NUM; i++) {
+    h_scores_base[i] = base_score_start + static_cast<S>(i);
+  }
+
+  create_keys_in_one_buckets<K, S, V, DIM>(
+      h_keys_test.data(), h_scores_test.data(), h_vectors_test.data(),
+      TEST_KEY_NUM, INIT_CAPACITY, BUCKET_MAX_SIZE, 1, 0x3FFFFFFFFFFFFFFF,
+      0xFFFFFFFFFFFFFFFD);
+  const S test_score_start = base_score_start + BASE_KEY_NUM;
+  for (size_t i = 0; i < TEST_KEY_NUM; i++) {
+    h_scores_test[i] = test_score_start + static_cast<S>(i);
+  }
+  for (size_t i = 64; i < TEST_KEY_NUM; i++) {
+    h_keys_test[i] = h_keys_base[i];
+    for (size_t j = 0; j < DIM; j++) {
+      h_vectors_test[i * DIM + j] = h_vectors_base[i * DIM + j];
+    }
+  }
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  size_t dump_counter = 0;
+  for (int i = 0; i < TEST_TIMES; i++) {
+    auto table = make_table<Table>(options);
+    size_t total_size = table->size(stream);
+    ACL_CHECK(aclrtSynchronizeStream(stream));
+    ASSERT_EQ(total_size, 0);
+
+    {
+      ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), BASE_KEY_NUM * sizeof(K),
+                            h_keys_base.data(), BASE_KEY_NUM * sizeof(K),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), BASE_KEY_NUM * sizeof(S),
+                            h_scores_base.data(), BASE_KEY_NUM * sizeof(S),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      ACL_CHECK(aclrtMemcpy(d_vectors.as<V>(), BASE_KEY_NUM * sizeof(V) * DIM,
+                            h_vectors_base.data(),
+                            BASE_KEY_NUM * sizeof(V) * DIM,
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(),
+                            BASE_KEY_NUM * sizeof(uint8_t),
+                            h_accum_or_assigns_base.data(),
+                            BASE_KEY_NUM * sizeof(uint8_t),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      table->accum_or_assign(BASE_KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                             d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                             stream);
+      ACL_CHECK(aclrtSynchronizeStream(stream));
+
+      size_t sz = table->size(stream);
+      size_t expected_size = 0;
+      for (size_t j = 0; j < BASE_KEY_NUM; j++) {
+        if (!h_accum_or_assigns_base[j]) {
+          expected_size++;
+        }
+      }
+      ACL_CHECK(aclrtSynchronizeStream(stream));
+      ASSERT_EQ(sz, expected_size);
+
+      dump_counter = table->export_batch(table->capacity(), 0, d_keys.as<K>(),
+                                         d_vectors.as<V>(), d_scores.as<S>(),
+                                         stream);
+      ASSERT_EQ(dump_counter, expected_size);
+
+      ACL_CHECK(aclrtMemcpy(h_keys_temp.data(), BASE_KEY_NUM * sizeof(K),
+                            d_keys.as<K>(), BASE_KEY_NUM * sizeof(K),
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+      ACL_CHECK(aclrtMemcpy(h_scores_temp.data(), BASE_KEY_NUM * sizeof(S),
+                            d_scores.as<S>(), BASE_KEY_NUM * sizeof(S),
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+      ACL_CHECK(aclrtMemcpy(h_vectors_temp.data(), BASE_KEY_NUM * sizeof(V) * DIM,
+                            d_vectors.as<V>(), BASE_KEY_NUM * sizeof(V) * DIM,
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+
+      for (size_t j = 0; j < dump_counter; j++) {
+        S expected_score = 0;
+        bool is_accum = false;
+        for (size_t k = 0; k < BASE_KEY_NUM; k++) {
+          if (h_keys_base[k] == h_keys_temp[j]) {
+            expected_score = h_scores_base[k];
+            is_accum = h_accum_or_assigns_base[k];
+            break;
+          }
+        }
+        ASSERT_FALSE(is_accum);
+        ASSERT_EQ(expected_score, h_scores_temp[j]);
+        for (size_t k = 0; k < DIM; k++) {
+          ASSERT_EQ(h_vectors_temp[j * DIM + k],
+                    static_cast<float>(h_keys_temp[j] * 0.00001));
+        }
+      }
+    }
+
+    {
+      ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), TEST_KEY_NUM * sizeof(K),
+                            h_keys_test.data(), TEST_KEY_NUM * sizeof(K),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), TEST_KEY_NUM * sizeof(S),
+                            h_scores_test.data(), TEST_KEY_NUM * sizeof(S),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(),
+                            TEST_KEY_NUM * sizeof(bool),
+                            h_accum_or_assigns_test.data(),
+                            TEST_KEY_NUM * sizeof(bool),
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      table->find(TEST_KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                  d_found.as<bool>(), nullptr, stream);
+      ACL_CHECK(aclrtSynchronizeStream(stream));
+
+      ACL_CHECK(aclrtMemcpy(h_found_temp.data(), TEST_KEY_NUM * sizeof(bool),
+                            d_found.as<bool>(), TEST_KEY_NUM * sizeof(bool),
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+
+      ACL_CHECK(aclrtMemcpy(d_vectors.as<V>(), TEST_KEY_NUM * sizeof(V) * DIM,
+                            h_vectors_test.data(),
+                            TEST_KEY_NUM * sizeof(V) * DIM,
+                            ACL_MEMCPY_HOST_TO_DEVICE));
+      table->accum_or_assign(TEST_KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                             d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                             stream);
+      ACL_CHECK(aclrtSynchronizeStream(stream));
+
+      size_t sz = table->size(stream);
+      ACL_CHECK(aclrtSynchronizeStream(stream));
+
+      size_t expected_size = 0;
+      for (size_t j = 0; j < BASE_KEY_NUM; j++) {
+        if (!h_accum_or_assigns_base[j]) {
+          expected_size++;
+        }
+      }
+      for (size_t j = 0; j < TEST_KEY_NUM; j++) {
+        if ((h_keys_base.end() ==
+             find(h_keys_base.begin(), h_keys_base.end(), h_keys_test[j])) &&
+            !h_accum_or_assigns_test[j]) {
+          expected_size++;
+        }
+      }
+      expected_size = min(expected_size, static_cast<size_t>(BUCKET_MAX_SIZE));
+
+      ASSERT_GE(sz, expected_size);
+      ASSERT_LE(sz, BUCKET_MAX_SIZE);
+
+      dump_counter = table->export_batch(table->capacity(), 0, d_keys.as<K>(),
+                                         d_vectors.as<V>(), d_scores.as<S>(),
+                                         stream);
+      ASSERT_EQ(dump_counter, sz);
+
+      ACL_CHECK(aclrtMemcpy(h_keys_temp.data(), TEMP_KEY_NUM * sizeof(K),
+                            d_keys.as<K>(), TEMP_KEY_NUM * sizeof(K),
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+      ACL_CHECK(aclrtMemcpy(h_scores_temp.data(), TEMP_KEY_NUM * sizeof(S),
+                            d_scores.as<S>(), TEMP_KEY_NUM * sizeof(S),
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+      ACL_CHECK(aclrtMemcpy(h_vectors_temp.data(), TEMP_KEY_NUM * sizeof(V) * DIM,
+                            d_vectors.as<V>(), TEMP_KEY_NUM * sizeof(V) * DIM,
+                            ACL_MEMCPY_DEVICE_TO_HOST));
+
+      for (size_t j = 0; j < dump_counter; j++) {
+        S expected_score = 888;
+        S base_score = 888;
+        S test_score = 888;
+        bool is_accum_test = false;
+        bool is_found_on_base = false;
+        for (size_t k = 0; k < BASE_KEY_NUM; k++) {
+          if (h_keys_base[k] == h_keys_temp[j]) {
+            is_found_on_base = !h_accum_or_assigns_base[k];
+            base_score = h_scores_base[k];
+            break;
+          }
+        }
+        for (size_t k = 0; k < TEST_KEY_NUM; k++) {
+          if (h_keys_test[k] == h_keys_temp[j]) {
+            is_accum_test = h_accum_or_assigns_test[k];
+            test_score = h_scores_test[k];
+            break;
+          }
+        }
+        if (is_found_on_base && is_accum_test) {
+          expected_score = test_score;
+        }
+        if (is_found_on_base && !is_accum_test) {
+          expected_score = base_score;
+        }
+        if (!is_found_on_base && !is_accum_test) {
+          expected_score = test_score;
+        }
+
+        ASSERT_EQ(expected_score, h_scores_temp[j])
+            << " found_on_base=" << is_found_on_base
+            << " is_accum_test=" << is_accum_test
+            << " base_score=" << base_score
+            << " test_score=" << test_score;
+        if (is_found_on_base && is_accum_test) {
+          for (size_t k = 0; k < DIM; k++) {
+            ASSERT_EQ(h_vectors_temp[j * DIM + k],
+                      static_cast<float>(h_keys_temp[j] * 0.00002));
+          }
+        } else {
+          for (size_t k = 0; k < DIM; k++) {
+            ASSERT_EQ(h_vectors_temp[j * DIM + k],
+                      static_cast<float>(h_keys_temp[j] * 0.00001));
+          }
+        }
+      }
+    }
+  }
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
 void test_evict_strategy_customized_correct_rate() {
   init_env();
   constexpr uint64_t BATCH_SIZE = 1024 * 1024ul;
@@ -1262,6 +1656,301 @@ void test_evict_strategy_customized_correct_rate() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
+void test_basic_when_full(size_t max_hbm_for_vectors = 16,
+                          int key_start = 0) {
+  init_env();
+  constexpr uint64_t INIT_CAPACITY = 1 * 1024 * 1024UL;
+  constexpr uint64_t MAX_CAPACITY = INIT_CAPACITY;
+  constexpr uint64_t KEY_NUM = 1 * 1024 * 1024UL;
+
+  TableOptions options;
+  options.reserved_key_start_bit = key_start;
+  options.init_capacity = INIT_CAPACITY;
+  options.max_capacity = MAX_CAPACITY;
+  options.dim = DIM;
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
+  using Table = HashTable<K, V, S, EvictStrategy::kCustomized>;
+
+  vector<K> h_keys(KEY_NUM);
+  vector<S> h_scores(KEY_NUM);
+  vector<V> h_vectors(KEY_NUM * DIM, 0);
+
+  create_random_keys<K, S, V, DIM>(h_keys.data(), h_scores.data(), nullptr,
+                                   KEY_NUM);
+
+  auto d_keys = DeviceMem::Alloc(KEY_NUM * sizeof(K));
+  auto d_scores = DeviceMem::Alloc(KEY_NUM * sizeof(S));
+  auto d_vectors = DeviceMem::Alloc(KEY_NUM * sizeof(V) * DIM);
+  auto d_accum_or_assigns = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), KEY_NUM * sizeof(K), h_keys.data(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), KEY_NUM * sizeof(S), h_scores.data(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_vectors.ptr, KEY_NUM * sizeof(V) * DIM, 1,
+                        KEY_NUM * sizeof(V) * DIM));
+  ACL_CHECK(aclrtMemset(d_accum_or_assigns.ptr, KEY_NUM * sizeof(bool), 0,
+                        KEY_NUM * sizeof(bool)));
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  auto table = make_table<Table>(options);
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table->accum_or_assign(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                         stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  uint64_t total_size_after_insert = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table->erase(KEY_NUM, d_keys.as<K>(), stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table->accum_or_assign(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                         stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  uint64_t total_size_after_reinsert = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(total_size_after_insert, total_size_after_reinsert);
+
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
+void test_erase_if_pred(size_t max_hbm_for_vectors, int key_start) {
+  init_env();
+  constexpr uint64_t INIT_CAPACITY = 256UL;
+  constexpr uint64_t MAX_CAPACITY = INIT_CAPACITY;
+  constexpr uint64_t KEY_NUM = 128UL;
+  constexpr float true_ratio = 0.5f;
+
+  TableOptions options;
+  options.reserved_key_start_bit = key_start;
+  options.init_capacity = INIT_CAPACITY;
+  options.max_capacity = MAX_CAPACITY;
+  options.dim = DIM;
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
+  using Table = HashTable<K, V, S, EvictStrategy::kCustomized>;
+
+  auto table = make_table<Table>(options);
+
+  vector<K> h_keys(KEY_NUM);
+  vector<S> h_scores(KEY_NUM);
+  vector<V> h_vectors(KEY_NUM * DIM);
+  vector<uint8_t> h_found(KEY_NUM);
+  vector<uint8_t> h_accum_or_assigns(KEY_NUM);
+
+  auto d_keys = DeviceMem::Alloc(KEY_NUM * sizeof(K));
+  auto d_scores = DeviceMem::Alloc(KEY_NUM * sizeof(S));
+  auto d_vectors = DeviceMem::Alloc(KEY_NUM * sizeof(V) * DIM);
+  auto d_found = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+  auto d_accum_or_assigns = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  create_keys_in_one_buckets<K, S, V, DIM>(h_keys.data(), h_scores.data(),
+                                           h_vectors.data(), KEY_NUM,
+                                           INIT_CAPACITY);
+  create_random_bools<K>(reinterpret_cast<bool*>(h_accum_or_assigns.data()),
+                         KEY_NUM, true_ratio);
+
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), KEY_NUM * sizeof(K), h_keys.data(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), KEY_NUM * sizeof(S), h_scores.data(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(), KEY_NUM * sizeof(bool),
+                        h_accum_or_assigns.data(), KEY_NUM * sizeof(bool),
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_found.ptr, KEY_NUM * sizeof(bool), 0,
+                        KEY_NUM * sizeof(bool)));
+
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table->accum_or_assign(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                         stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t expected_size = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    if (!h_accum_or_assigns[i]) {
+      expected_size++;
+    }
+  }
+  ASSERT_EQ(table->size(stream), expected_size);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  constexpr K pattern = 100;
+  constexpr S threshold = 0;
+  size_t erase_num = table->template erase_if<AccumOrAssignEraseIfPredFunctor>(
+      pattern, threshold, stream);
+  size_t total_size = table->size(stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(erase_num + total_size, expected_size);
+
+  ACL_CHECK(aclrtMemset(d_vectors.ptr, KEY_NUM * sizeof(V) * DIM, 0,
+                        KEY_NUM * sizeof(V) * DIM));
+  table->find(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(), d_found.as<bool>(),
+              d_scores.as<S>(), stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  ACL_CHECK(aclrtMemcpy(h_found.data(), KEY_NUM * sizeof(bool), d_found.as<bool>(),
+                        KEY_NUM * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_scores.data(), KEY_NUM * sizeof(S), d_scores.as<S>(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  size_t found_num = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    const bool inserted = !h_accum_or_assigns[i];
+    const bool erased =
+        inserted && (((h_keys[i] & 0x1u) == 0x1u) && (h_scores[i] > threshold));
+    if (h_found[i]) {
+      found_num++;
+      ASSERT_TRUE(inserted);
+      ASSERT_FALSE(erased);
+      ASSERT_EQ(h_scores[i], h_keys[i]);
+      for (size_t j = 0; j < DIM; j++) {
+        ASSERT_EQ(h_vectors[i * DIM + j],
+                  static_cast<float>(h_keys[i] * 0.00001));
+      }
+    }
+  }
+  ASSERT_EQ(found_num, expected_size - erase_num);
+
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
+void test_export_batch_if(size_t max_hbm_for_vectors, int key_start) {
+  init_env();
+  constexpr uint64_t INIT_CAPACITY = 256UL;
+  constexpr uint64_t MAX_CAPACITY = INIT_CAPACITY;
+  constexpr uint64_t KEY_NUM = 128UL;
+  constexpr float true_ratio = 0.6f;
+
+  TableOptions options;
+  options.reserved_key_start_bit = key_start;
+  options.init_capacity = INIT_CAPACITY;
+  options.max_capacity = MAX_CAPACITY;
+  options.dim = DIM;
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
+  using Table = HashTable<K, V, S, EvictStrategy::kLru>;
+
+  auto table = make_table<Table>(options);
+
+  vector<K> h_keys(KEY_NUM);
+  vector<S> h_scores(KEY_NUM);
+  vector<V> h_vectors(KEY_NUM * DIM);
+  vector<uint8_t> h_accum_or_assigns(KEY_NUM);
+  vector<uint8_t> h_found(KEY_NUM);
+
+  auto d_keys = DeviceMem::Alloc(KEY_NUM * sizeof(K));
+  auto d_scores = DeviceMem::Alloc(KEY_NUM * sizeof(S));
+  auto d_vectors = DeviceMem::Alloc(KEY_NUM * sizeof(V) * DIM);
+  auto d_found = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+  auto d_accum_or_assigns = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+  auto d_dump_counter = DeviceMem::Alloc(sizeof(size_t));
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+  K pattern = 100;
+  S threshold = host_nano<S>(stream);
+
+  create_random_bools<K>(reinterpret_cast<bool*>(h_accum_or_assigns.data()),
+                         KEY_NUM, true_ratio);
+  create_random_keys<K, S, V, DIM>(h_keys.data(), h_scores.data(),
+                                   h_vectors.data(), KEY_NUM);
+
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), KEY_NUM * sizeof(K), h_keys.data(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), KEY_NUM * sizeof(S), h_scores.data(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(), KEY_NUM * sizeof(bool),
+                        h_accum_or_assigns.data(), KEY_NUM * sizeof(bool),
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  table->accum_or_assign(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t expected_size = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    if (!h_accum_or_assigns[i]) {
+      expected_size++;
+    }
+  }
+  ASSERT_EQ(table->size(stream), expected_size);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  ACL_CHECK(aclrtMemset(d_vectors.ptr, KEY_NUM * sizeof(V) * DIM, 0,
+                        KEY_NUM * sizeof(V) * DIM));
+  table->find(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(), d_found.as<bool>(),
+              nullptr, stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  ACL_CHECK(aclrtMemcpy(h_found.data(), KEY_NUM * sizeof(bool), d_found.as<bool>(),
+                        KEY_NUM * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+  size_t found_num = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    if (h_found[i]) {
+      found_num++;
+      for (size_t j = 0; j < DIM; j++) {
+        ASSERT_EQ(h_vectors[i * DIM + j],
+                  static_cast<float>(h_keys[i] * 0.00001));
+      }
+    }
+  }
+  ASSERT_EQ(found_num, expected_size);
+
+  table->template export_batch_if<AccumOrAssignExportIfPredFunctor>(
+      pattern, threshold, table->capacity(), 0, d_dump_counter.as<size_t>(),
+      d_keys.as<K>(), d_vectors.as<V>(), d_scores.as<S>(), stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  size_t dump_counter = 0;
+  ACL_CHECK(aclrtMemcpy(&dump_counter, sizeof(size_t), d_dump_counter.as<size_t>(),
+                        sizeof(size_t), ACL_MEMCPY_DEVICE_TO_HOST));
+
+  ACL_CHECK(aclrtMemcpy(h_keys.data(), KEY_NUM * sizeof(K), d_keys.as<K>(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_scores.data(), KEY_NUM * sizeof(S), d_scores.as<S>(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  for (size_t i = 0; i < dump_counter; i++) {
+    ASSERT_GT(h_scores[i], threshold);
+    for (size_t j = 0; j < DIM; j++) {
+      ASSERT_EQ(h_vectors[i * DIM + j],
+                static_cast<float>(h_keys[i] * 0.00001));
+    }
+  }
+
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
 void test_rehash() {
   init_env();
   constexpr uint64_t BUCKET_MAX_SIZE = 128ul;
@@ -1357,11 +2046,200 @@ void test_rehash() {
   ACL_CHECK(aclrtDestroyStream(stream));
 }
 
-// hybrid模式（HBM+HMEM）下 accum_or_assign SIMD value-copy 测试
-// capacity=128, max_hbm_for_vectors 仅容纳一半 value，
-// 插入 key_num=1024 >> capacity，确保表满且部分 value 落在 host 内存。
-// Phase 1: 验证 ASSIGN — 全部 accum_or_assigns=false
-// Phase 2: 验证 ACCUM  — 全部 accum_or_assigns=true，值应变为 2 倍
+void test_rehash_on_big_batch() {
+  init_env();
+  constexpr uint64_t INIT_CAPACITY = 1024;
+  constexpr uint64_t MAX_CAPACITY = 16 * 1024;
+  constexpr uint64_t INIT_KEY_NUM = 1024;
+  constexpr uint64_t KEY_NUM = 2048;
+  constexpr float true_ratio = 0.6f;
+
+  unordered_map<K, float> expected_values;
+
+  TableOptions options;
+  options.init_capacity = INIT_CAPACITY;
+  options.max_capacity = MAX_CAPACITY;
+  options.dim = DIM;
+  options.max_bucket_size = 128;
+  options.max_load_factor = 0.6f;
+  options.max_hbm_for_vectors = GB(16);
+  using Table = HashTable<K, V, S, EvictStrategy::kCustomized>;
+
+  vector<K> h_keys(KEY_NUM);
+  vector<S> h_scores(KEY_NUM);
+  vector<V> h_vectors(KEY_NUM * DIM);
+  vector<uint8_t> h_found(KEY_NUM);
+  vector<uint8_t> h_accum_or_assigns(KEY_NUM);
+  vector<uint8_t> h_accum_or_assigns_init(KEY_NUM);
+
+  auto d_keys = DeviceMem::Alloc(KEY_NUM * sizeof(K));
+  auto d_scores = DeviceMem::Alloc(KEY_NUM * sizeof(S));
+  auto d_vectors = DeviceMem::Alloc(KEY_NUM * sizeof(V) * DIM);
+  auto d_accum_or_assigns = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+  auto d_found = DeviceMem::Alloc(KEY_NUM * sizeof(bool));
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  auto table = make_table<Table>(options);
+
+  create_random_keys<K, S, V, DIM>(h_keys.data(), h_scores.data(),
+                                   h_vectors.data(), KEY_NUM);
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), KEY_NUM * sizeof(K), h_keys.data(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_scores.as<S>(), KEY_NUM * sizeof(S), h_scores.data(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemcpy(d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_found.ptr, KEY_NUM * sizeof(bool), 0,
+                        KEY_NUM * sizeof(bool)));
+  ACL_CHECK(aclrtMemset(d_accum_or_assigns.ptr, KEY_NUM * sizeof(bool), 0,
+                        KEY_NUM * sizeof(bool)));
+
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  create_random_bools<K>(reinterpret_cast<bool*>(h_accum_or_assigns.data()),
+                         INIT_KEY_NUM, true_ratio);
+  ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(), INIT_KEY_NUM * sizeof(bool),
+                        h_accum_or_assigns.data(), INIT_KEY_NUM * sizeof(bool),
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  table->accum_or_assign(INIT_KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                         stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_GE(table->capacity(), INIT_CAPACITY * 2);
+
+  size_t expected_size = 0;
+  for (size_t i = 0; i < INIT_KEY_NUM; i++) {
+    expected_size += (h_accum_or_assigns[i] ? 0 : 1);
+  }
+  ASSERT_EQ(table->size(stream), expected_size);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(table->capacity(), INIT_CAPACITY * 2);
+
+  copy(h_accum_or_assigns.begin(), h_accum_or_assigns.end(),
+       h_accum_or_assigns_init.begin());
+  create_random_bools<K>(reinterpret_cast<bool*>(h_accum_or_assigns.data()),
+                         KEY_NUM, true_ratio);
+  ACL_CHECK(aclrtMemcpy(d_accum_or_assigns.as<bool>(), KEY_NUM * sizeof(bool),
+                        h_accum_or_assigns.data(), KEY_NUM * sizeof(bool),
+                        ACL_MEMCPY_HOST_TO_DEVICE));
+  table->accum_or_assign(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(),
+                         d_accum_or_assigns.as<bool>(), d_scores.as<S>(),
+                         stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  expected_values.clear();
+  expected_size = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    if (i < INIT_KEY_NUM) {
+      if (h_accum_or_assigns_init[i]) {
+        if (!h_accum_or_assigns[i]) {
+          expected_size++;
+          expected_values[h_keys[i]] = static_cast<float>(h_keys[i] * 0.00001);
+        }
+      } else {
+        expected_size++;
+        if (h_accum_or_assigns[i]) {
+          expected_values[h_keys[i]] = static_cast<float>(h_keys[i] * 0.00002);
+        } else {
+          expected_values[h_keys[i]] = static_cast<float>(h_keys[i] * 0.00001);
+        }
+      }
+    }
+    if (i >= INIT_KEY_NUM && (!h_accum_or_assigns[i])) {
+      expected_size++;
+      expected_values[h_keys[i]] = static_cast<float>(h_keys[i] * 0.00001);
+    }
+  }
+
+  ASSERT_EQ(table->size(stream), expected_size);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_GE(table->capacity(), KEY_NUM * 2);
+
+  size_t dump_counter = table->export_batch(table->capacity(), 0, d_keys.as<K>(),
+                                            d_vectors.as<V>(), d_scores.as<S>(),
+                                            stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ASSERT_EQ(dump_counter, expected_size);
+
+  ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), KEY_NUM * sizeof(K), h_keys.data(),
+                        KEY_NUM * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+  ACL_CHECK(aclrtMemset(d_vectors.ptr, KEY_NUM * sizeof(V) * DIM, 0,
+                        KEY_NUM * sizeof(V) * DIM));
+  ACL_CHECK(aclrtMemset(d_scores.ptr, KEY_NUM * sizeof(S), 0,
+                        KEY_NUM * sizeof(S)));
+  table->find(KEY_NUM, d_keys.as<K>(), d_vectors.as<V>(), d_found.as<bool>(),
+              d_scores.as<S>(), stream);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+
+  ACL_CHECK(aclrtMemcpy(h_found.data(), KEY_NUM * sizeof(bool), d_found.as<bool>(),
+                        KEY_NUM * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_scores.data(), KEY_NUM * sizeof(S), d_scores.as<S>(),
+                        KEY_NUM * sizeof(S), ACL_MEMCPY_DEVICE_TO_HOST));
+  ACL_CHECK(aclrtMemcpy(h_vectors.data(), KEY_NUM * sizeof(V) * DIM,
+                        d_vectors.as<V>(), KEY_NUM * sizeof(V) * DIM,
+                        ACL_MEMCPY_DEVICE_TO_HOST));
+
+  int found_num = 0;
+  for (size_t i = 0; i < KEY_NUM; i++) {
+    if (h_found[i]) {
+      found_num++;
+      ASSERT_EQ(h_scores[i], h_keys[i]);
+      for (size_t j = 0; j < DIM; j++) {
+        ASSERT_EQ(h_vectors[i * DIM + j], expected_values[h_keys[i]]);
+      }
+    }
+  }
+  ASSERT_EQ(found_num, expected_size);
+
+  table->clear(stream);
+  ASSERT_EQ(table->size(stream), 0);
+  ACL_CHECK(aclrtSynchronizeStream(stream));
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
+void test_accum_or_assign_values_check(size_t max_hbm_for_vectors) {
+  init_env();
+  const size_t U = 524288;
+  const size_t init_capacity = 1024;
+  const size_t B = 524288 + 13;
+  constexpr size_t dim = 64;
+
+  TableOptions options;
+  options.max_capacity = U;
+  options.init_capacity = init_capacity;
+  options.max_hbm_for_vectors = GB(max_hbm_for_vectors);
+  options.dim = dim;
+  using Table = HashTable<K, V, S, EvictStrategy::kLru>;
+
+  aclrtStream stream;
+  ACL_CHECK(aclrtCreateStream(&stream));
+
+  auto table = make_table<Table>(options);
+  vector<K> h_keys(B);
+  vector<V> h_values(B * dim);
+  auto d_keys = DeviceMem::Alloc(B * sizeof(K));
+  auto d_values = DeviceMem::Alloc(B * sizeof(V) * dim);
+
+  for (int i = 0; i < 20; i++) {
+    create_random_keys<K, S, V, dim>(h_keys.data(), static_cast<S*>(nullptr),
+                                     h_values.data(), B, B * 16);
+    ACL_CHECK(aclrtMemcpy(d_keys.as<K>(), B * sizeof(K), h_keys.data(),
+                          B * sizeof(K), ACL_MEMCPY_HOST_TO_DEVICE));
+    ACL_CHECK(aclrtMemcpy(d_values.as<V>(), B * sizeof(V) * dim,
+                          h_values.data(), B * sizeof(V) * dim,
+                          ACL_MEMCPY_HOST_TO_DEVICE));
+
+    CheckAccumOrAssignValues<Table, dim>(table.get(), h_keys, d_keys, d_values,
+                                         B, stream);
+  }
+
+  ACL_CHECK(aclrtDestroyStream(stream));
+}
+
 static void test_accum_or_assign_hybrid_dim(size_t dim) {
   init_env();
   SCOPED_TRACE(::testing::Message() << "dim = " << dim);
@@ -1498,20 +2376,43 @@ TEST(AccumOrAssignTest, HybridMode_Dim1024) {
   test_accum_or_assign_hybrid_dim(1024);
 }
 
+TEST(AccumOrAssignTest, test_export_batch_if) {
+  test_export_batch_if(16, 22);
+  // Re-enable pure DDR once export_batch_if supports DDR mode. test_export_batch_if(0, 0);
+}
+
+TEST(AccumOrAssignTest, test_basic_when_full) {
+  test_basic_when_full(16, 0);
+  test_basic_when_full(0, 7);
+}
+
+TEST(AccumOrAssignTest, test_erase_if_pred) {
+  test_erase_if_pred(16, 0);
+  test_erase_if_pred(0, 5);
+}
+
 TEST(AccumOrAssignTest, test_evict_strategy_lru_basic) {
-  test_evict_strategy_lru_basic();
+  test_evict_strategy_lru_basic(16);
+  // Re-enable pure DDR once export_batch supports DDR mode. test_evict_strategy_lru_basic(0);
 }
 TEST(AccumOrAssignTest, test_evict_strategy_lfu_basic) {
-  test_evict_strategy_lfu_basic();
+  test_evict_strategy_lfu_basic(16, 3);
 }
 TEST(AccumOrAssignTest, test_evict_strategy_epochlru_basic) {
-  test_evict_strategy_epochlru_basic();
+  test_evict_strategy_epochlru_basic(16, 33);
+  // Re-enable pure DDR once export_batch supports DDR mode. test_evict_strategy_epochlru_basic(0);
 }
 TEST(AccumOrAssignTest, test_evict_strategy_epochlfu_basic) {
-  test_evict_strategy_epochlfu_basic();
+  test_evict_strategy_epochlfu_basic(16);
+  // Re-enable pure DDR once export_batch supports DDR mode. test_evict_strategy_epochlfu_basic(0, 44);
+}
+TEST(AccumOrAssignTest, test_evict_strategy_customized_basic) {
+  test_evict_strategy_customized_basic(16);
+  // Re-enable pure DDR once export_batch supports DDR mode. test_evict_strategy_customized_basic(0, 23);
 }
 TEST(AccumOrAssignTest, test_evict_strategy_customized_advanced) {
-  test_evict_strategy_customized_advanced();
+  test_evict_strategy_customized_advanced(16, 16);
+  // Re-enable pure DDR once export_batch supports DDR mode. test_evict_strategy_customized_advanced(0);
 }
 // run case need add --gtest_also_run_disabled_tests
 TEST(AccumOrAssignTest, DISABLED_test_evict_strategy_customized_correct_rate) {
@@ -1519,4 +2420,10 @@ TEST(AccumOrAssignTest, DISABLED_test_evict_strategy_customized_correct_rate) {
 }
 TEST(AccumOrAssignTest, test_rehash) {
   test_rehash();
+}
+TEST(AccumOrAssignTest, test_rehash_on_big_batch) {
+  test_rehash_on_big_batch();
+}
+TEST(AccumOrAssignTest, test_accum_or_assign_values_check) {
+  test_accum_or_assign_values_check(16);
 }
