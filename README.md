@@ -162,7 +162,7 @@ int main(int args, char *argv[])
 ### 构建依赖
   - [CANN开发套件包](https://hiascend.com/document/redirect/CannCommunityInstSoftware)
 
-  - [googletest](https://github.com/google/googletest)
+  - [googletest](https://gitcode.com/gh_mirrors/googl/googletest)
 
 ### 快速构建
 
