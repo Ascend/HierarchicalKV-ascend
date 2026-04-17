@@ -1128,31 +1128,66 @@ class HashTable : public HashTableBase<K, V, S> {
                 n_align_warp, value_move_opt_.cg_size);
       }
     } else {
-      size_t size_all = n * sizeof(value_type*) + n * sizeof(key_type*);
-      auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
-      auto temp_storage{dev_ws.get<uint8_t*>(0)};
-      value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
-      key_type** d_dst_keys{
-          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+      bool filter_condition = unique_key && !options_.io_by_cpu;
+      if (filter_condition) {
+        size_t size_all = n * sizeof(value_type*) + n * sizeof(key_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        key_type** d_dst_keys{reinterpret_cast<key_type**>(
+            temp_storage + n * sizeof(value_type*))};
+        // 1. find_and_lock位置：输出dst_value* value_index dst_key*
+        upsert_kernel_lock_key_hybrid<K, V, S, evict_strategy_>
+            <<<block_dim_, 0, stream>>>(
+                static_cast<void*>(table_->buckets), table_->buckets_size,
+                table_->capacity, table_->bucket_max_size, table_->dim,
+                const_cast<key_type*>(keys), const_cast<score_type*>(scores), n,
+                global_epoch_, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+                n_align_warp, d_dst_values, d_dst_keys);
 
-      // 1. find_and_lock位置：输出dst_value* value_index dst_key*
-      upsert_kernel_lock_key_hybrid<K, V, S, evict_strategy_>
-          <<<block_dim_, 0, stream>>>(
-              static_cast<void*>(table_->buckets), table_->buckets_size,
-              table_->capacity, table_->bucket_max_size, table_->dim,
-              const_cast<key_type*>(keys), const_cast<score_type*>(scores), n,
-              global_epoch_, table_->max_bucket_shift,
-              table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-              n_align_warp, d_dst_values, d_dst_keys);
+        // 2. io：搬运value，释放lock
+        auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                         sizeof(value_type), false);
+        write_kernel_unlock<K, V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+            tiling.former_num, tiling.former_core_move_num,
+            tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+            table_->dim, const_cast<key_type*>(keys),
+            const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+      } else {
+        size_t dst_ptr_size = n * sizeof(value_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(dst_ptr_size, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        NPU_CHECK(aclrtMemsetAsync(temp_storage, dst_ptr_size, 0, dst_ptr_size,
+                                   stream));
 
-      // 2. io：搬运value，释放lock
-      auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
-      write_kernel_unlock<K, V><<<block_dim_, tiling.valid_ub_size, stream>>>(
-          tiling.former_num, tiling.former_core_move_num,
-          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
-          table_->dim, const_cast<key_type*>(keys),
-          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+        // 区别在于，不搬运value，但释放key
+        upsert_kernel<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
+            table_->buckets, table_->buckets_size, table_->capacity,
+            table_->bucket_max_size, table_->dim, keys, scores, n, d_dst_values,
+            global_epoch_, table_->max_bucket_shift,
+            table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+        if (options_.io_by_cpu) {
+          size_t value_size = n * table_->dim * sizeof(value_type);
+
+          size_t host_size_all = value_size + dst_ptr_size;
+          auto host_ws{host_mem_pool_->get_workspace<1>(host_size_all, stream)};
+          auto host_storage{host_ws.get<uint8_t*>(0)};
+          value_type* h_values{reinterpret_cast<value_type*>(host_storage)};
+          value_type** h_dst_values{reinterpret_cast<value_type**>(
+              host_storage + n * table_->dim * sizeof(value_type))};
+          NPU_CHECK(aclrtMemcpyAsync(h_values, value_size, values, value_size,
+                                     ACL_MEMCPY_DEVICE_TO_HOST, stream));
+          NPU_CHECK(aclrtMemcpyAsync(h_dst_values, dst_ptr_size, d_dst_values,
+                                     dst_ptr_size, ACL_MEMCPY_DEVICE_TO_HOST,
+                                     stream));
+          NPU_CHECK(aclrtSynchronizeStream(stream));
+          write_by_cpu<V>(h_dst_values, h_values, table_->dim, n);
+        } else {
+          HKV_CHECK(false, "insert_or_assign unique_key is not supported.");
+        }
+      }
     }
 
     NpuCheckError();

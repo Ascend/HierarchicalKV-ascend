@@ -47,6 +47,7 @@ target_link_libraries(hkv_demo PRIVATE
   hkv_includes
   opapi
   nnopbase
+  pthread
 )
 
 add_executable(hkv_benchmark
@@ -72,6 +73,7 @@ target_link_libraries(hkv_benchmark PRIVATE
   hkv_includes
   opapi
   nnopbase
+  pthread
 )
 
 add_executable(hkv_benchmark_find_miss
@@ -96,6 +98,7 @@ target_link_libraries(hkv_benchmark_find_miss PRIVATE
   hkv_includes
   opapi
   nnopbase
+  pthread
 )
 
 if(ENABLE_TEST STREQUAL 1)

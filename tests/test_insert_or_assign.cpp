@@ -434,7 +434,7 @@ TEST(TestInsertOrAssign, test_little_demo_benchmark) {
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 }
 
-void test_ddr_dim_basic(size_t dim) {
+void test_ddr_dim_basic(size_t dim, bool io_by_cpu = false) {
   // 1. 初始化
   init_env();
   using K = int64_t;
@@ -449,8 +449,9 @@ void test_ddr_dim_basic(size_t dim) {
   options.init_capacity = capacity;
   options.max_capacity = capacity;
   options.max_hbm_for_vectors =
-      capacity * sizeof(V) * dim / 2;  // 一半device一半host
+      io_by_cpu ? 0 : capacity * sizeof(V) * dim / 2;  // 一半device一半host
   options.dim = dim;
+  options.io_by_cpu = io_by_cpu;
 
   table->init(options);
   EXPECT_EQ(table->size(), 0);
@@ -484,3 +485,13 @@ void test_ddr_dim_basic(size_t dim) {
 TEST(TestInsertOrAssign, test_ddr_dim_8) { test_ddr_dim_basic(8); }
 
 TEST(TestInsertOrAssign, test_ddr_dim_1024) { test_ddr_dim_basic(1024); }
+
+TEST(TestInsertOrAssign, test_ddr_dim_20480) { test_ddr_dim_basic(20480); }
+
+TEST(TestInsertOrAssign, test_ddr_dim_8_by_cpu) {
+  // 待淘汰策略key冲突问题解决再开放，test_ddr_dim_basic(8, true);
+}
+
+TEST(TestInsertOrAssign, test_ddr_dim_1024_by_cpu) {
+  // 待淘汰策略key冲突问题解决再开放，test_ddr_dim_basic(1024, true);
+}

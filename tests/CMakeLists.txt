@@ -39,6 +39,7 @@ target_link_libraries(test_main PRIVATE
   hkv_includes
   opapi
   nnopbase
+  pthread
 )
 add_test(NAME test_main COMMAND test_main)
 
@@ -58,7 +59,7 @@ target_link_libraries(test_aclnn_helper PRIVATE
   hkv_includes
   opapi
   nnopbase
-  -lpthread
+  pthread
 )
 add_test(NAME test_aclnn_helper COMMAND test_aclnn_helper)
 
@@ -77,5 +78,6 @@ target_link_libraries(test_score_functor PRIVATE
   hkv_includes
   opapi
   nnopbase
+  pthread
 )
 add_test(NAME test_score_functor COMMAND test_score_functor)
