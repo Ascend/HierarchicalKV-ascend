@@ -19,7 +19,7 @@ target_include_directories(hkv_includes INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-add_compile_options(-std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0)
+add_compile_options(-std=c++17)
 
 set_source_files_properties(
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp

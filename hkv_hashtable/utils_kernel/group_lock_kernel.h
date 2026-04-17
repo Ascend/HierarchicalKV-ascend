@@ -58,11 +58,15 @@ template <typename T>
 __simt_vf__ __aicore__ LAUNCH_BOUND(1) inline void lock_read_kernel_vf(
     __gm__ int32_t* update_count, __gm__ int32_t* read_count) {
   for (;;) {
-    volatile int32_t tmp = update_count[0];
+    int32_t tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                        L1CacheType::NON_CACHEABLE>(update_count);
     while (tmp) {
+      tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                  L1CacheType::NON_CACHEABLE>(update_count);
     }
     asc_atomic_add(read_count, 1);
-    tmp = update_count[0];
+    tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                L1CacheType::NON_CACHEABLE>(update_count);
     if (tmp == 0) {
       break;
     }
@@ -99,11 +103,15 @@ template <typename T>
 __simt_vf__ __aicore__ LAUNCH_BOUND(1) inline void lock_update_kernel_vf(
     __gm__ int32_t* update_count, __gm__ int32_t* read_count) {
   for (;;) {
-    volatile int32_t tmp = read_count[0];
+    int32_t tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                        L1CacheType::NON_CACHEABLE>(read_count);
     while (tmp) {
+      tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                  L1CacheType::NON_CACHEABLE>(read_count);
     }
     asc_atomic_add(update_count, 1);
-    tmp = read_count[0];
+    tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                L1CacheType::NON_CACHEABLE>(read_count);
     if (tmp == 0) {
       break;
     }
@@ -149,24 +157,31 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(1) inline void lock_update_read_kernel_vf(
 
   /* Ban update */
   for (;;) {
-    volatile int32_t tmp = update_count[0];
+    int32_t tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                        L1CacheType::NON_CACHEABLE>(update_count);
     while (tmp) {
+      tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                  L1CacheType::NON_CACHEABLE>(update_count);
     }
     asc_atomic_add(read_count, 1);
-    tmp = update_count[0];
+    tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                L1CacheType::NON_CACHEABLE>(update_count);
     if (tmp == 0) {
       break;
     }
     asc_atomic_sub(read_count, 1);
   }
-
   /* Ban read */
   for (;;) {
-    volatile int32_t tmp = read_count[0];
+    int32_t tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                        L1CacheType::NON_CACHEABLE>(read_count);
     while (tmp > 1) {
+      tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                  L1CacheType::NON_CACHEABLE>(read_count);
     }
     asc_atomic_add(update_count, 1);
-    tmp = read_count[0];
+    tmp = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                L1CacheType::NON_CACHEABLE>(read_count);
     if (tmp == 1) {
       break;
     }
