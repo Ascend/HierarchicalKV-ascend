@@ -23,6 +23,7 @@
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
 #include "test_util.h"
+#include "test_device_data.h"
 
 using namespace std;
 using namespace npu::hkv;
@@ -273,3 +274,204 @@ TEST(test_export_batch, test_export_offset) {
   config.offset = 5000;
   RUN_EXPORT_TEST(int64_t, double, uint64_t, 16, config);
 }
+
+template <typename K, typename V, typename S, size_t DIM>
+void run_export_hybrid_test(const ExportTestConfig& config) {
+  // 1. 初始化环境
+  init_env();
+
+  // 2. 配置哈希表
+  constexpr size_t init_capacity = 128UL * 1024;
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = init_capacity,
+      .max_hbm_for_vectors = init_capacity * sizeof(V) * DIM / 2,
+      .dim = DIM,
+      .io_by_cpu = false,
+  };
+
+  // 3. 初始化哈希表并插入数据
+  HashTable<K, V> table;
+  table.init(options);
+  EXPECT_EQ(table.size(), 0);
+
+  K* device_keys = nullptr;
+  V* device_values = nullptr;
+
+  DeviceData<K, V, S> device_data;
+  size_t key_num = config.key_num > 0 ? config.key_num : 1024;
+  device_data.malloc(key_num, DIM);
+
+  if (!config.test_empty_table) {
+    // 生成测试数据
+    vector<K> host_keys(config.key_num);
+    vector<V> host_values(config.key_num * DIM);
+    create_continuous_keys<K, S, V, DIM>(host_keys.data(), nullptr,
+                                         host_values.data(), config.key_num);
+
+    // 分配设备内存并复制数据
+    device_data.copy_keys(host_keys, config.key_num);
+    device_data.copy_values(host_values, config.key_num, DIM);
+
+    // 插入数据
+    table.insert_or_assign(config.key_num, device_data.device_keys, device_data.device_values, nullptr,
+                           device_data.stream);
+    ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+    EXPECT_LE(table.size(), config.key_num);
+  }
+
+  // 4. 准备导出缓冲区
+  const size_t scan_len = table.capacity();
+  K* device_export_keys = nullptr;
+  V* device_export_values = nullptr;
+  S* device_export_scores = nullptr;
+
+  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_export_keys),
+                        scan_len * sizeof(K), ACL_MEM_MALLOC_HUGE_FIRST),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_export_values),
+                        scan_len * DIM * sizeof(V), ACL_MEM_MALLOC_HUGE_FIRST),
+            ACL_ERROR_NONE);
+
+  if (config.use_scores) {
+    ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_export_scores),
+                          scan_len * sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST),
+              ACL_ERROR_NONE);
+    ASSERT_EQ(aclrtMemset(device_export_scores, scan_len * sizeof(S), 0,
+                          scan_len * sizeof(S)),
+              ACL_ERROR_NONE);
+  }
+
+  ASSERT_EQ(aclrtMemset(device_export_keys, scan_len * sizeof(K), 0,
+                        scan_len * sizeof(K)),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemset(device_export_values, scan_len * DIM * sizeof(V), 0,
+                        scan_len * DIM * sizeof(V)),
+            ACL_ERROR_NONE);
+
+  // 5. 执行导出操作
+  size_t export_count = 0;
+
+  if (config.test_overload) {
+    // 测试重载版本
+    export_count = table.export_batch(
+        scan_len, config.offset, device_export_keys, device_export_values,
+        config.use_scores ? device_export_scores : nullptr, device_data.stream);
+    ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  } else {
+    // 测试普通版本
+    size_t* device_export_count = nullptr;
+    ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_export_count),
+                          sizeof(size_t), ACL_MEM_MALLOC_HUGE_FIRST),
+              ACL_ERROR_NONE);
+    ASSERT_EQ(
+        aclrtMemset(device_export_count, sizeof(size_t), 0, sizeof(size_t)),
+        ACL_ERROR_NONE);
+
+    table.export_batch(scan_len, config.offset, device_export_count,
+                       device_export_keys, device_export_values,
+                       config.use_scores ? device_export_scores : nullptr,
+                       device_data.stream);
+
+    ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+    ASSERT_EQ(aclrtMemcpy(&export_count, sizeof(size_t), device_export_count,
+                          sizeof(size_t), ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+
+    ASSERT_EQ(aclrtFree(device_export_count), ACL_ERROR_NONE);
+  }
+
+  // 6. 验证结果
+  if (config.test_empty_table) {
+    // 空表测试：导出数量应为0
+    ASSERT_EQ(export_count, table.size(device_data.stream));
+  } else {
+    // 偏移测试：导出数量可能小于插入数量，但不能大于插入数量
+    ASSERT_LE(export_count, table.size(device_data.stream));
+    ASSERT_GE(export_count, 0);
+  }
+
+  if (export_count > 0 && !config.test_empty_table) {
+    // 复制导出结果到主机
+    vector<K> host_export_keys(export_count);
+    vector<V> host_export_values(export_count * DIM);
+
+    ASSERT_EQ(aclrtMemcpy(host_export_keys.data(), export_count * sizeof(K),
+                          device_export_keys, export_count * sizeof(K),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+    ASSERT_EQ(
+        aclrtMemcpy(host_export_values.data(), export_count * DIM * sizeof(V),
+                    device_export_values, export_count * DIM * sizeof(V),
+                    ACL_MEMCPY_DEVICE_TO_HOST),
+        ACL_ERROR_NONE);
+
+    // 构建验证map
+    vector<K> host_keys(config.key_num);
+    vector<V> host_values(config.key_num * DIM);
+    create_continuous_keys<K, S, V, DIM>(host_keys.data(), nullptr,
+                                         host_values.data(), config.key_num);
+
+    unordered_map<K, vector<V>> reference_map;
+    reference_map.reserve(config.key_num);
+    for (size_t i = 0; i < config.key_num; ++i) {
+      vector<V> vec(DIM);
+      copy(host_values.begin() + i * DIM, host_values.begin() + (i + 1) * DIM,
+           vec.begin());
+      reference_map[host_keys[i]] = move(vec);
+    }
+
+    // 验证每个导出的键值对都存在于参考map中且值正确
+    for (size_t i = 0; i < export_count; ++i) {
+      const K& key = host_export_keys[i];
+      auto it = reference_map.find(key);
+      ASSERT_NE(it, reference_map.end())
+          << "Exported key " << key << " not found in reference map";
+
+      vector<V> exported_vec(DIM);
+      copy(host_export_values.begin() + i * DIM,
+           host_export_values.begin() + (i + 1) * DIM, exported_vec.begin());
+      ASSERT_EQ(exported_vec, it->second) << "Values mismatch for key " << key;
+    }
+  }
+
+  // 7. 清理资源
+  ASSERT_EQ(aclrtFree(device_export_keys), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtFree(device_export_values), ACL_ERROR_NONE);
+  if (config.use_scores) {
+    ASSERT_EQ(aclrtFree(device_export_scores), ACL_ERROR_NONE);
+  }
+}
+
+// 辅助宏：简化测试调用
+#define RUN_EXPORT_HYBRID_TEST(K, V, S, DIM, config) \
+  run_export_hybrid_test<K, V, S, DIM>(config)
+
+// 测试用例定义
+TEST(test_export_batch, test_export_hybrid_basic) {
+  ExportTestConfig config = {1024, false, false, 0, false};
+  RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
+}
+
+TEST(test_export_batch, test_export_hybrid_overload) {
+  ExportTestConfig config = {1024, true, false, 0, true};
+  RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
+}
+
+TEST(test_export_batch, test_export_hybrid_empty) {
+  ExportTestConfig config = {0, false, true, 0, false};
+  RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
+}
+
+TEST(test_export_batch, test_export_hybrid_offset) {
+  // 测试不同偏移量下的导出功能
+  // 注意：当offset > 0时，不能保证导出数量等于key_num
+  ExportTestConfig config = {1024, false, false, 5000, false};
+  RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
+}
+
+TEST(test_export_batch, test_export_hybrid_large) {
+  ExportTestConfig config = {128 * 1024, false, false, 0, false};
+  RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
+}
+
