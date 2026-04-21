@@ -29,51 +29,6 @@ using namespace npu::hkv;
 using namespace test_util;
 
 template <typename K, typename V, typename S>
-void check_result(vector<V>& host_values, size_t key_num,
-                  DeviceData<K, V, S>& device_data,
-                  size_t expect_found_num = numeric_limits<size_t>::max(),
-                  size_t dim = DEFAULT_DIM) {
-  expect_found_num = expect_found_num == numeric_limits<size_t>::max()
-                         ? key_num
-                         : expect_found_num;
-  bool* host_found = nullptr;
-  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
-                            key_num * sizeof(bool)),
-            ACL_ERROR_NONE);
-  ASSERT_EQ(
-      aclrtMemcpy(host_found, key_num * sizeof(bool), device_data.device_found,
-                  key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
-      ACL_ERROR_NONE);
-  vector<void*> real_values_ptr(key_num, nullptr);
-  ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*),
-                        device_data.device_values_ptr, key_num * sizeof(void*),
-                        ACL_MEMCPY_DEVICE_TO_HOST),
-            ACL_ERROR_NONE);
-  size_t found_num = 0;
-  vector<V> real_values(dim, 0);
-  for (size_t i = 0; i < key_num; i++) {
-    if (host_found[i]) {
-      ASSERT_NE(real_values_ptr[i], nullptr);
-      found_num++;
-
-      ASSERT_EQ(
-          aclrtMemcpy(real_values.data(), dim * device_data.each_value_size,
-                      real_values_ptr[i], dim * device_data.each_value_size,
-                      ACL_MEMCPY_DEVICE_TO_HOST),
-          ACL_ERROR_NONE);
-      vector<V> expect_values(host_values.begin() + i * dim,
-                              host_values.begin() + i * dim + dim);
-      ASSERT_EQ(expect_values, real_values);
-    } else {
-      ASSERT_EQ(real_values_ptr[i], nullptr);
-    }
-  }
-  EXPECT_EQ(found_num, expect_found_num);
-
-  ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
-}
-
-template <typename K, typename V, typename S>
 void test_insert_and_assign_basic() {
   // 1. 初始化
   init_env();

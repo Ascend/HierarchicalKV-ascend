@@ -1740,9 +1740,7 @@ class HashTable : public HashTableBase<K, V, S> {
     if (n == 0) {
       return;
     }
-
     check_evict_strategy(scores);
-
     std::unique_ptr<update_shared_lock> lock_ptr;
     if (options_.api_lock) {
       lock_ptr = std::make_unique<update_shared_lock>(mutex_, stream);
@@ -1758,13 +1756,75 @@ class HashTable : public HashTableBase<K, V, S> {
           table_->max_bucket_shift, table_->capacity_divisor_magic,
           table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
       } else {
-        assign_kernel_with_io<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+        assign_kernel_with_io<K, V, S, evict_strategy, true><<<block_dim_, 0, stream>>>(
           table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
-          keys, values, scores, n, global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic,
+          keys, values, scores, n, nullptr, global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic,
           table_->capacity_divisor_shift);
       }
     } else {
-      throw std::runtime_error("[assign] Only supported in pure HBM mode.");
+      bool filter_condition = unique_key && !options_.io_by_cpu;
+      if (filter_condition) {
+        uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+        size_t size_all = n * sizeof(value_type*) + n * sizeof(key_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        key_type** d_dst_keys{
+          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+
+        assign_kernel_lock_key_hybrid<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
+          table_->buckets,
+          table_->capacity, table_->bucket_max_size, table_->dim,
+          keys, scores, n, global_epoch_, table_->max_bucket_shift,
+          table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+          n_align_warp, d_dst_values, d_dst_keys);
+
+        auto tiling =
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+        write_kernel<K, V, true><<<block_dim_, tiling.valid_ub_size, stream>>>(
+          tiling.former_num, tiling.former_core_move_num,
+          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+          table_->dim, const_cast<key_type*>(keys),
+          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+      } else {
+        size_t dst_ptr_size = n * sizeof(value_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(dst_ptr_size, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        NPU_CHECK(aclrtMemsetAsync(temp_storage, dst_ptr_size, 0, dst_ptr_size,
+                                   stream));
+
+        assign_kernel_with_io<K, V, S, evict_strategy, false><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
+          keys, values, scores, n, d_dst_values, global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic,
+          table_->capacity_divisor_shift);
+        if (options_.io_by_cpu) {
+          size_t value_size = n * table_->dim * sizeof(value_type);
+
+          size_t host_size_all = value_size + dst_ptr_size;
+          auto host_ws{host_mem_pool_->get_workspace<1>(host_size_all, stream)};
+          auto host_storage{host_ws.get<uint8_t*>(0)};
+          value_type* h_values{reinterpret_cast<value_type*>(host_storage)};
+          value_type** h_dst_values{reinterpret_cast<value_type**>(
+            host_storage + n * table_->dim * sizeof(value_type))};
+          NPU_CHECK(aclrtMemcpyAsync(h_values, value_size, values, value_size,
+                                     ACL_MEMCPY_DEVICE_TO_HOST, stream));
+          NPU_CHECK(aclrtMemcpyAsync(h_dst_values, dst_ptr_size, d_dst_values,
+                                     dst_ptr_size, ACL_MEMCPY_DEVICE_TO_HOST,
+                                     stream));
+          NPU_CHECK(aclrtSynchronizeStream(stream));
+          write_by_cpu<V>(h_dst_values, h_values, table_->dim, n);
+        } else {
+          auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                           sizeof(value_type), false);
+          write_kernel<K, V, false>
+              <<<block_dim_, tiling.valid_ub_size, stream>>>(
+                  tiling.former_num, tiling.former_core_move_num,
+                  tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+                  table_->dim, const_cast<key_type*>(keys),
+                  const_cast<value_type*>(values), n, d_dst_values, nullptr);
+        }
+      }
     }
     NpuCheckError();
   }
@@ -1863,18 +1923,81 @@ class HashTable : public HashTableBase<K, V, S> {
       if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
         uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
         assign_values_kernel<K, V, S><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-        const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
-        n, value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
-        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+          table_->buckets, table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
+          const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
+          n, value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
+          table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
       } else {
-        assign_values_kernel_with_io<K, V, S><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
-        const_cast<key_type*>(keys), const_cast<value_type*>(values),
-        n, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+        assign_values_kernel_with_io<K, V, S, true><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity, table_->bucket_max_size,
+          static_cast<uint32_t>(options_.dim), const_cast<key_type*>(keys), const_cast<value_type*>(values),
+          n, nullptr, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
       }
     } else {
-      throw std::runtime_error("[assign_values] Only supported in pure HBM mode.");
+      bool filter_condition = unique_key && !options_.io_by_cpu;
+      if (filter_condition) {
+        uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+        size_t size_all = n * sizeof(value_type*) + n * sizeof(key_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        key_type** d_dst_keys{
+          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+
+        assign_values_kernel_lock_key_hybrid<K, V, S><<<block_dim_, 0, stream>>>(
+          table_->buckets, 
+          table_->capacity, table_->bucket_max_size, table_->dim,
+          keys, n, table_->max_bucket_shift,
+          table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+          n_align_warp, d_dst_values, d_dst_keys);
+
+        auto tiling =
+          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+        write_kernel<K, V, true><<<block_dim_, tiling.valid_ub_size, stream>>>(
+          tiling.former_num, tiling.former_core_move_num,
+          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+          table_->dim, const_cast<key_type*>(keys),
+          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+      } else {
+        size_t dst_ptr_size = n * sizeof(value_type*);
+        auto dev_ws{dev_mem_pool_->get_workspace<1>(dst_ptr_size, stream)};
+        auto temp_storage{dev_ws.get<uint8_t*>(0)};
+        value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
+        NPU_CHECK(aclrtMemsetAsync(temp_storage, dst_ptr_size, 0, dst_ptr_size,
+                                   stream));
+
+        assign_values_kernel_with_io<K, V, S, false><<<block_dim_, 0, stream>>>(
+          table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
+          const_cast<key_type*>(keys), const_cast<value_type*>(values),
+          n, d_dst_values, table_->max_bucket_shift, table_->capacity_divisor_magic,
+          table_->capacity_divisor_shift);
+        if (options_.io_by_cpu) {
+          size_t value_size = n * table_->dim * sizeof(value_type);
+
+          size_t host_size_all = value_size + dst_ptr_size;
+          auto host_ws{host_mem_pool_->get_workspace<1>(host_size_all, stream)};
+          auto host_storage{host_ws.get<uint8_t*>(0)};
+          value_type* h_values{reinterpret_cast<value_type*>(host_storage)};
+          value_type** h_dst_values{reinterpret_cast<value_type**>(
+              host_storage + n * table_->dim * sizeof(value_type))};
+          NPU_CHECK(aclrtMemcpyAsync(h_values, value_size, values, value_size,
+                                     ACL_MEMCPY_DEVICE_TO_HOST, stream));
+          NPU_CHECK(aclrtMemcpyAsync(h_dst_values, dst_ptr_size, d_dst_values,
+                                     dst_ptr_size, ACL_MEMCPY_DEVICE_TO_HOST,
+                                     stream));
+          NPU_CHECK(aclrtSynchronizeStream(stream));
+          write_by_cpu<V>(h_dst_values, h_values, table_->dim, n);
+        } else {
+          auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                           sizeof(value_type), false);
+          write_kernel<K, V, false>
+              <<<block_dim_, tiling.valid_ub_size, stream>>>(
+                  tiling.former_num, tiling.former_core_move_num,
+                  tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+                  table_->dim, const_cast<key_type*>(keys),
+                  const_cast<value_type*>(values), n, d_dst_values, nullptr);
+        }
+      }
     }
     NpuCheckError();
   }

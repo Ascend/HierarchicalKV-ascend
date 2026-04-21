@@ -92,3 +92,48 @@ class DeviceData {
   size_t each_score_size = sizeof(S);
   size_t each_value_size = sizeof(V);
 };
+
+template <typename K, typename V, typename S>
+void check_result(std::vector<V>& host_values, size_t key_num,
+                  DeviceData<K, V, S>& device_data,
+                  size_t expect_found_num = std::numeric_limits<size_t>::max(),
+                  size_t dim = test_util::DEFAULT_DIM) {
+  expect_found_num = expect_found_num == std::numeric_limits<size_t>::max()
+                         ? key_num
+                         : expect_found_num;
+  bool* host_found = nullptr;
+  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                            key_num * sizeof(bool)),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(
+      aclrtMemcpy(host_found, key_num * sizeof(bool), device_data.device_found,
+                  key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
+      ACL_ERROR_NONE);
+  std::vector<void*> real_values_ptr(key_num, nullptr);
+  ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*),
+                        device_data.device_values_ptr, key_num * sizeof(void*),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+  size_t found_num = 0;
+  std::vector<V> real_values(dim, 0);
+  for (size_t i = 0; i < key_num; i++) {
+    if (host_found[i]) {
+      ASSERT_NE(real_values_ptr[i], nullptr);
+      found_num++;
+
+      ASSERT_EQ(
+          aclrtMemcpy(real_values.data(), dim * device_data.each_value_size,
+                      real_values_ptr[i], dim * device_data.each_value_size,
+                      ACL_MEMCPY_DEVICE_TO_HOST),
+          ACL_ERROR_NONE);
+      std::vector<V> expect_values(host_values.begin() + i * dim,
+                                   host_values.begin() + i * dim + dim);
+      ASSERT_EQ(expect_values, real_values);
+    } else {
+      ASSERT_EQ(real_values_ptr[i], nullptr);
+    }
+  }
+  EXPECT_EQ(found_num, expect_found_num);
+
+  ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+}

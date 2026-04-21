@@ -172,14 +172,14 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
 }
 
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-          int32_t TILE_SIZE = 32>
+          int32_t TILE_SIZE = 32, bool IS_FAST_MODE>
 __simt_vf__ __aicore__
 LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
     uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
     uint64_t n, uint32_t thread_all, uint32_t block_index,
-    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
-    uint64_t capacity_divisor_shift) {
+    __gm__ V* __gm__* d_dst_values, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
   if (!buckets) {
     return;
   }
@@ -191,7 +191,6 @@ LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
   }
   auto lane_id = threadIdx.x % TILE_SIZE;
   const uint64_t N = n * TILE_SIZE;
-
   for (uint64_t t = block_index * blockDim.x + threadIdx.x; t < N;
        t += thread_all) {
     uint64_t key_idx = t / TILE_SIZE;
@@ -213,12 +212,114 @@ LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
 
     if (occupy_result == OccupyResult::REFUSED) continue;
     if (occupy_result == OccupyResult::DUPLICATE) {
-      copy_vector<V, TILE_SIZE>(values + key_idx * dim,
-                                bucket_vectors + key_pos * dim, dim, lane_id);
-      asc_threadfence();
+      if constexpr (IS_FAST_MODE) {
+        copy_vector<V, TILE_SIZE>(values + key_idx * dim,
+                                  bucket_vectors + key_pos * dim, dim, lane_id);
+      }
     }
     if (lane_id == 0) {
+      if constexpr (!IS_FAST_MODE) {
+        if (occupy_result == OccupyResult::DUPLICATE) {
+          d_dst_values[key_idx] = bucket_vectors + key_pos * dim;
+        } else {
+          d_dst_values[key_idx] = nullptr;
+        }
+      }
+      asc_threadfence();
       (void)asc_atomic_exch(bucket_keys + key_pos, key);
+    }
+  }
+}
+
+template <typename K = uint64_t, typename V = float, typename S = uint64_t>
+__simt_vf__ __aicore__
+LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_lock_key_hybrid_vf(
+    __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys, uint64_t n,
+    uint32_t block_index, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
+    uint64_t n_align_warp, uint32_t thread_all, __gm__ V* __gm__* d_dst_values,
+    __gm__ K* __gm__* d_dst_keys) {
+  if (buckets == nullptr) {
+    return;
+  }
+  if (keys == nullptr) {
+    return;
+  }
+  using BUCKET = Bucket<K, V, S>;
+  constexpr uint32_t STRIDE = sizeof(VecD_Comp) / sizeof(D);
+
+  uint32_t key_pos = 0;
+  K key = 0;
+  __gm__ K* bucket_keys = nullptr;
+  __gm__ V* bucket_values = nullptr;
+  for (uint64_t kv_idx = block_index * blockDim.x + threadIdx.x;
+       kv_idx < n_align_warp; kv_idx += thread_all) {
+    VecD_Comp target_digests{0};
+    OccupyResult occupy_result{OccupyResult::INITIAL};
+    if (kv_idx < n) {
+      key = keys[kv_idx];
+      if (IS_RESERVED_KEY<K>(key)) {
+        occupy_result = OccupyResult::ILLEGAL;
+      } else {
+        const K hashed_key = Murmur3HashDevice(key);
+        target_digests = digests_from_hashed<K>(hashed_key);
+        uint64_t global_idx = get_global_idx(hashed_key, capacity_divisor_magic,
+                                             capacity_divisor_shift, capacity);
+        key_pos = global_idx & (bucket_max_size - 1);
+        uint64_t bkt_idx = global_idx >> max_bucket_shift;
+
+        __gm__ Bucket<K, V, S>* bucket = buckets + bkt_idx;
+        bucket_keys = bucket->keys_;
+        bucket_values = bucket->vectors;
+
+        for (uint32_t offset = 0; offset < bucket_max_size + STRIDE;
+             offset += STRIDE) {
+          if (occupy_result != OccupyResult::INITIAL) {
+            break;
+          }
+          uint32_t pos_cur = align_to<STRIDE>(key_pos);
+          pos_cur = (pos_cur + offset) & (bucket_max_size - 1);
+
+          __gm__ D* digests_ptr =
+              BUCKET::digests(bucket_keys, bucket_max_size, pos_cur);
+          VecD_Comp probe_digests =
+              *reinterpret_cast<__gm__ VecD_Comp*>(digests_ptr);
+          uint32_t possible_pos = 0;
+          uint32_t cmp_result = vcmpeq4(probe_digests, target_digests);
+          cmp_result &= 0x01010101;
+          do {
+            if (cmp_result == 0) {
+              break;
+            }
+            uint32_t index = (__ffs(static_cast<int32_t>(cmp_result)) - 1) >> 3;
+            cmp_result &= (cmp_result - 1);
+            possible_pos = pos_cur + index;
+
+            auto current_key_ptr = BUCKET::keys(bucket_keys, possible_pos);
+            auto try_key = asc_atomic_cas(current_key_ptr, key,
+                                          static_cast<K>(LOCKED_KEY));
+            if (try_key == key) {
+              occupy_result = OccupyResult::DUPLICATE;
+              key_pos = possible_pos;
+              break;
+            }
+          } while (true);
+          if (occupy_result == OccupyResult::DUPLICATE) {
+            break;
+          }
+        }
+      }
+    } else {
+      occupy_result = OccupyResult::ILLEGAL;
+    }
+
+    if (occupy_result == OccupyResult::DUPLICATE) {
+      d_dst_values[kv_idx] = bucket_values + key_pos * dim;
+      d_dst_keys[kv_idx] = bucket_keys + key_pos;
+    } else if (kv_idx < n) {
+      d_dst_values[kv_idx] = nullptr;
+      d_dst_keys[kv_idx] = nullptr;
     }
   }
 }
@@ -242,18 +343,36 @@ __global__ __vector__ void assign_values_kernel(
           n_align_warp, group_size)));
 }
 
-template <class K, class V, class S>
+template <class K, class V, class S, bool IS_FAST_MODE>
 __global__ __vector__ void assign_values_kernel_with_io(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
     uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
-    uint64_t n, uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
-    uint64_t capacity_divisor_shift) {
+    uint64_t n, __gm__ V* __gm__* d_dst_values, uint32_t max_bucket_shift,
+    uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
   constexpr uint32_t thread_num = 1024;
   const uint32_t thread_all = thread_num * GetBlockNum();
-  asc_vf_call<assign_values_kernel_with_io_vf<K, V, S>>(
+  asc_vf_call<assign_values_kernel_with_io_vf<K, V, S, 32, IS_FAST_MODE>>(
       dim3{static_cast<uint32_t>(thread_num)}, buckets, capacity,
       bucket_max_size, dim, keys, values, n, thread_all, GetBlockIdx(),
-      max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift);
+      d_dst_values, max_bucket_shift, capacity_divisor_magic,
+      capacity_divisor_shift);
+}
+
+template <class K, class V, class S>
+__global__ __vector__ void assign_values_kernel_lock_key_hybrid(
+    __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
+    uint32_t bucket_max_size, uint32_t dim, const __gm__ K* keys, uint64_t n,
+    uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
+    uint64_t capacity_divisor_shift, uint64_t n_align_warp,
+    __gm__ V* __gm__* d_dst_values, __gm__ K* __gm__* d_dst_keys) {
+  constexpr uint32_t thread_num = 512;
+  const uint32_t thread_all = thread_num * GetBlockNum();
+
+  asc_vf_call<assign_values_kernel_lock_key_hybrid_vf<K, V, S>>(
+      dim3{thread_num}, buckets, capacity, bucket_max_size, dim, keys, n,
+      GetBlockIdx(), max_bucket_shift, capacity_divisor_magic,
+      capacity_divisor_shift, n_align_warp, thread_all, d_dst_values,
+      d_dst_keys);
 }
 }  // namespace hkv
 }  // namespace npu
