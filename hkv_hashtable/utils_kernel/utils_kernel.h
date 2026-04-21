@@ -34,12 +34,15 @@ using namespace AscendC;
 constexpr uint32_t BLOCK_SIZE = 1024;
 
 template <class V>
-__simt_vf__ __aicore__
-LAUNCH_BOUND(BLOCK_SIZE) inline void read_from_ptr_kernel_vf(
-    __gm__ void* src_addr, __gm__ V* dst_addr,
-    const size_t dim, size_t N, uint32_t blockIdx, uint32_t blockNums) {
-  const __gm__ V* const __gm__* src = reinterpret_cast<const __gm__ V* const __gm__* __restrict>(src_addr);
-  __gm__ V* dst = reinterpret_cast<__gm__ V* __restrict >(dst_addr);
+__simt_vf__ __aicore__ LAUNCH_BOUND(
+    BLOCK_SIZE) inline void read_from_ptr_kernel_vf(__gm__ void* src_addr,
+                                                    __gm__ V* dst_addr,
+                                                    const size_t dim, size_t N,
+                                                    uint32_t blockIdx,
+                                                    uint32_t blockNums) {
+  const __gm__ V* const __gm__* src =
+      reinterpret_cast<const __gm__ V* const __gm__* __restrict>(src_addr);
+  __gm__ V* dst = reinterpret_cast<__gm__ V* __restrict>(dst_addr);
 
   size_t tid = (blockIdx * blockDim.x) + threadIdx.x;
 
@@ -53,13 +56,11 @@ LAUNCH_BOUND(BLOCK_SIZE) inline void read_from_ptr_kernel_vf(
 }
 
 template <class V>
-__global__ __vector__ void read_from_ptr_kernel(__gm__ void* src,
-                                                __gm__ V* dst,
-                                                const size_t dim,
-                                                size_t N) {
+__global__ __vector__ void read_from_ptr_kernel(__gm__ void* src, __gm__ V* dst,
+                                                const size_t dim, size_t N) {
   asc_vf_call<read_from_ptr_kernel_vf<V>>(
-                      dim3{static_cast<uint32_t>(BLOCK_SIZE)}, src,
-                      dst, dim, N, GetBlockIdx(), GetBlockNum());
+      dim3{static_cast<uint32_t>(BLOCK_SIZE)}, src, dst, dim, N, GetBlockIdx(),
+      GetBlockNum());
 }
 
 template <class S>
@@ -78,11 +79,13 @@ __global__ __vector__ void host_nano_kernel(__gm__ S* d_clk) {
  *        GM->UB->GM transfers.
  */
 template <class V>
-__global__ __vector__ void read_value_kernel(
-    uint32_t former_num, uint64_t former_core_move_num,
-    uint64_t tail_core_move_num, uint32_t tile_size, uint32_t num_tiles,
-    uint32_t dim, __gm__ V* values, uint64_t n,
-    __gm__ V* __gm__* d_src_values) {
+__global__ __vector__ void read_value_kernel(uint32_t former_num,
+                                             uint64_t former_core_move_num,
+                                             uint64_t tail_core_move_num,
+                                             uint32_t tile_size,
+                                             uint32_t num_tiles, uint32_t dim,
+                                             __gm__ V* values, uint64_t n,
+                                             __gm__ V* __gm__* d_src_values) {
   uint64_t cur_block_idx = GetBlockIdx();
   uint64_t core_start_idx = 0;
   uint64_t core_move_count = 0;
@@ -107,8 +110,7 @@ __global__ __vector__ void read_value_kernel(
 
   dst_values_gm.SetGlobalBuffer(values);
 
-  for (uint64_t i = core_start_idx; i < core_start_idx + core_move_count;
-       i++) {
+  for (uint64_t i = core_start_idx; i < core_start_idx + core_move_count; i++) {
     __gm__ V* src_value = d_src_values[i];
     if (src_value == nullptr) {
       continue;
@@ -138,8 +140,19 @@ __global__ __vector__ void read_value_kernel(
   }
 }
 
+template <typename V, int32_t TILE_SIZE>
+__forceinline__ __simt_callee__ void copy_vector(__gm__ const V* src,
+                                                 __gm__ V* dst,
+                                                 const uint32_t dim,
+                                                 const uint32_t lane_id) {
+  for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {
+    V val = src[i];
+    __stg<ST_L2CacheType::L2_CACHE_HINT_NORMAL_FV, L1CacheType::NON_CACHEABLE>(
+        dst + i, val);
+  }
+}
+
 }  // namespace hkv
 }  // namespace npu
- 
- #endif  // ASCENDC_UITLS_KERNEL_H_
- 
+
+#endif  // ASCENDC_UITLS_KERNEL_H_

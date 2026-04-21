@@ -1098,7 +1098,7 @@ class HashTable : public HashTableBase<K, V, S> {
     if (!ignore_evict_strategy) {
       check_evict_strategy(scores);
     }
-    
+
     std::unique_ptr<insert_unique_lock> lock_ptr;
     if (options_.api_lock) {
       lock_ptr = std::make_unique<insert_unique_lock>(mutex_, stream);
@@ -1106,26 +1106,40 @@ class HashTable : public HashTableBase<K, V, S> {
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     if (is_fast_mode()) {
-      if (value_move_opt_.is_large_size) {
-        insert_or_assign_kernel_with_thread_1024<K, V, S, evict_strategy_>
-            <<<block_dim_, 0, stream>>>(
-                static_cast<void*>(table_->buckets), table_->buckets_size,
-                table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-                const_cast<key_type*>(keys), const_cast<value_type*>(values),
-                const_cast<score_type*>(scores), n, global_epoch_,
-                value_move_opt_.size, table_->max_bucket_shift,
-                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-                n_align_warp, value_move_opt_.cg_size);
+      if (unique_key) {
+        if (value_move_opt_.is_large_size) {
+          insert_or_assign_kernel_with_thread_1024<K, V, S, evict_strategy_>
+              <<<block_dim_, 0, stream>>>(
+                  static_cast<void*>(table_->buckets), table_->buckets_size,
+                  table_->capacity, table_->bucket_max_size,
+                  value_move_opt_.dim, const_cast<key_type*>(keys),
+                  const_cast<value_type*>(values),
+                  const_cast<score_type*>(scores), n, global_epoch_,
+                  value_move_opt_.size, table_->max_bucket_shift,
+                  table_->capacity_divisor_magic,
+                  table_->capacity_divisor_shift, n_align_warp,
+                  value_move_opt_.cg_size);
+        } else {
+          insert_or_assign_kernel<K, V, S, evict_strategy_>
+              <<<block_dim_, 0, stream>>>(
+                  static_cast<void*>(table_->buckets), table_->buckets_size,
+                  table_->capacity, table_->bucket_max_size,
+                  value_move_opt_.dim, const_cast<key_type*>(keys),
+                  const_cast<value_type*>(values),
+                  const_cast<score_type*>(scores), n, global_epoch_,
+                  value_move_opt_.size, table_->max_bucket_shift,
+                  table_->capacity_divisor_magic,
+                  table_->capacity_divisor_shift, n_align_warp,
+                  value_move_opt_.cg_size);
+        }
       } else {
-        insert_or_assign_kernel<K, V, S, evict_strategy_>
+        upsert_kernel<K, V, S, true, evict_strategy_>
             <<<block_dim_, 0, stream>>>(
-                static_cast<void*>(table_->buckets), table_->buckets_size,
-                table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-                const_cast<key_type*>(keys), const_cast<value_type*>(values),
-                const_cast<score_type*>(scores), n, global_epoch_,
-                value_move_opt_.size, table_->max_bucket_shift,
-                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-                n_align_warp, value_move_opt_.cg_size);
+                table_->buckets, table_->buckets_size, table_->capacity,
+                table_->bucket_max_size, table_->dim, keys, scores, n,
+                const_cast<value_type*>(values), nullptr, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift);
       }
     } else {
       bool filter_condition = unique_key && !options_.io_by_cpu;
@@ -1149,7 +1163,7 @@ class HashTable : public HashTableBase<K, V, S> {
         // 2. io：搬运value，释放lock
         auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
                                          sizeof(value_type), false);
-        write_kernel_unlock<K, V><<<block_dim_, tiling.valid_ub_size, stream>>>(
+        write_kernel<K, V, true><<<block_dim_, tiling.valid_ub_size, stream>>>(
             tiling.former_num, tiling.former_core_move_num,
             tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
             table_->dim, const_cast<key_type*>(keys),
@@ -1163,11 +1177,12 @@ class HashTable : public HashTableBase<K, V, S> {
                                    stream));
 
         // 区别在于，不搬运value，但释放key
-        upsert_kernel<K, V, S, evict_strategy_><<<block_dim_, 0, stream>>>(
-            table_->buckets, table_->buckets_size, table_->capacity,
-            table_->bucket_max_size, table_->dim, keys, scores, n, d_dst_values,
-            global_epoch_, table_->max_bucket_shift,
-            table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+        upsert_kernel<K, V, S, false, evict_strategy_>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->buckets_size, table_->capacity,
+                table_->bucket_max_size, table_->dim, keys, scores, n, nullptr,
+                d_dst_values, global_epoch_, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift);
         if (options_.io_by_cpu) {
           size_t value_size = n * table_->dim * sizeof(value_type);
 
@@ -1185,7 +1200,14 @@ class HashTable : public HashTableBase<K, V, S> {
           NPU_CHECK(aclrtSynchronizeStream(stream));
           write_by_cpu<V>(h_dst_values, h_values, table_->dim, n);
         } else {
-          HKV_CHECK(false, "insert_or_assign unique_key is not supported.");
+          auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                           sizeof(value_type), false);
+          write_kernel<K, V, false>
+              <<<block_dim_, tiling.valid_ub_size, stream>>>(
+                  tiling.former_num, tiling.former_core_move_num,
+                  tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+                  table_->dim, const_cast<key_type*>(keys),
+                  const_cast<value_type*>(values), n, d_dst_values, nullptr);
         }
       }
     }
@@ -1463,7 +1485,7 @@ class HashTable : public HashTableBase<K, V, S> {
                 d_dst_values, d_accum_or_assigns);
 
         auto tiling =
-            GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), TRIPLE_BUFFER * DOUBLE_BUFFER);
+            GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), true, TRIPLE_BUFFER * DOUBLE_BUFFER);
         write_with_accum_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
             tiling.former_num, tiling.former_core_move_num,
             tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,

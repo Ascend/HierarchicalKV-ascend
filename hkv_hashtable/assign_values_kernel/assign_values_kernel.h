@@ -171,17 +171,6 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
   }
 }
 
-template <typename V, int32_t TILE_SIZE>
-__forceinline__ __simt_callee__ void copy_vector(__gm__ const V* src, __gm__ V* dst,
-                                            const uint32_t dim,
-                                            const uint32_t lane_id) {
-  for (uint32_t i = lane_id; i < dim; i += TILE_SIZE) {
-    V val = src[i];
-    __stg<ST_L2CacheType::L2_CACHE_HINT_NORMAL_FV, L1CacheType::NON_CACHEABLE>(
-        dst + i, val);
-  }
-}
-
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
           int32_t TILE_SIZE = 32>
 __simt_vf__ __aicore__

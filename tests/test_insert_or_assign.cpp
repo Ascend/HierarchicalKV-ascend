@@ -495,3 +495,203 @@ TEST(TestInsertOrAssign, test_ddr_dim_8_by_cpu) {
 TEST(TestInsertOrAssign, test_ddr_dim_1024_by_cpu) {
   // 待淘汰策略key冲突问题解决再开放，test_ddr_dim_basic(1024, true);
 }
+
+void test_repeat_key_basic(size_t dim, size_t hbm_for_values, bool io_by_cpu) {
+  // 1. 初始化
+  init_env();
+  constexpr size_t key_num = 1UL * 1024;
+
+  // 2. 建表
+  using K = int64_t;
+  using V = float;
+  using S = uint64_t;
+
+  using Table = npu::hkv::HashTable<K, V, S>;
+  auto table = std::make_unique<Table>();
+  npu::hkv::HashTableOptions options{
+      .init_capacity = DEFAULT_CAPACITY,
+      .max_capacity = DEFAULT_CAPACITY,
+      .max_hbm_for_vectors = hbm_for_values,
+      .dim = dim,
+      .io_by_cpu = io_by_cpu,
+  };
+  table->init(options);
+  EXPECT_EQ(table->size(), 0);
+
+  // 3. 申请hbm内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  // 4. 空桶插值
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+  create_continuous_keys<K, S, V>(dim, host_keys.data(), nullptr,
+                                  host_values.data(), key_num);
+  constexpr size_t repeat_num = 10;
+  set<K> inserted_keys;
+  for (size_t i = 0; i < key_num; i++) {
+    host_keys[i] = i / repeat_num;
+    inserted_keys.insert(host_keys[i]);
+  }
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
+  table->insert_or_assign(key_num, device_data.device_keys,
+                          device_data.device_values, nullptr,
+                          device_data.stream, false);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table->size(device_data.stream),
+            (key_num + repeat_num - 1) / repeat_num);
+
+  // 5. 校验插入结果
+  DeviceData<K, V, S> find_data;
+  find_data.malloc(key_num, dim);
+  table->find(key_num, device_data.device_keys, find_data.device_values_ptr,
+              find_data.device_found, nullptr, find_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(find_data.stream), ACL_ERROR_NONE);
+
+  bool* host_found = nullptr;
+  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_found),
+                            key_num * sizeof(bool)),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(
+      aclrtMemcpy(host_found, key_num * sizeof(bool), find_data.device_found,
+                  key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
+      ACL_ERROR_NONE);
+  set<K> found_keys;
+  vector<V*> found_values(key_num, nullptr);
+  ASSERT_EQ(aclrtMemcpy(found_values.data(), key_num * sizeof(V*),
+                        find_data.device_values_ptr, key_num * sizeof(V*),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+  for (size_t i = 0; i < key_num; i++) {
+    if (!host_found[i] || found_keys.find(host_keys[i]) != found_keys.end()) {
+      continue;
+    }
+    found_keys.insert(host_keys[i]);
+    bool found = false;
+    vector<V> real_values(dim, 0);
+    ASSERT_EQ(aclrtMemcpy(real_values.data(), dim * find_data.each_value_size,
+                          found_values[i], dim * find_data.each_value_size,
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+    size_t search_start = i / repeat_num * repeat_num;
+    for (size_t j = search_start; j < search_start + repeat_num; j++) {
+      vector<V> possible_values(host_values.begin() + j * dim,
+                                host_values.begin() + j * dim + dim);
+      if (host_keys[i] == host_keys[j] && possible_values == real_values) {
+        found = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(found) << "key: " << host_keys[i] << " not found";
+  }
+
+  EXPECT_EQ(found_keys.size(), inserted_keys.size());
+  ASSERT_EQ(aclrtFreeHost(host_found), ACL_ERROR_NONE);
+  table->clear(find_data.stream);
+  EXPECT_EQ(table->size(find_data.stream), 0);
+}
+
+TEST(TestInsertOrAssign, test_repeat_key_with_pure_hbm) {
+  constexpr size_t hbm_for_values = numeric_limits<size_t>::max();
+  test_repeat_key_basic(20480, hbm_for_values, false);
+}
+
+TEST(TestInsertOrAssign, test_repeat_key_with_ddr) {
+  // 待淘汰策略key冲突问题解决再开放，constexpr size_t hbm_for_values = 4UL <<
+  // 30; 待淘汰策略key冲突问题解决再开放，test_repeat_key_basic(20480,
+  // hbm_for_values, false);
+}
+
+TEST(TestInsertOrAssign, test_repeat_key_with_pure_ddr) {
+  // 待淘汰策略key冲突问题解决再开放，test_repeat_key_basic(DEFAULT_DIM, 0,
+  // false);
+}
+
+TEST(TestInsertOrAssign, test_repeat_key_with_io_by_cpu) {
+  // 待淘汰策略key冲突问题解决再开放，test_repeat_key_basic(DEFAULT_DIM, 0,
+  // true);
+}
+
+TEST(TestInsertOrAssign, test_scores) {
+  // 1. 初始化
+  init_env();
+  using K = int64_t;
+  using V = float;
+  using S = uint64_t;
+  constexpr size_t dim = DEFAULT_DIM;
+  constexpr size_t key_num = 100;
+
+  // 2. 使用get_table函数创建custom淘汰策略的HashTable
+  auto table =
+      test_util::get_table<K, V, S, npu::hkv::EvictStrategy::kCustomized>(
+          dim, DEFAULT_CAPACITY, 1);
+  EXPECT_EQ(table->size(), 0);
+
+  // 3. 申请设备内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  // 4. 使用create_continuous_keys生成测试数据，包括键、值和分数
+  vector<K> host_keys(key_num);
+  vector<V> host_values(key_num * dim);
+  vector<S> host_scores(key_num);
+
+  test_util::create_continuous_keys<K, S, V>(
+      dim, host_keys.data(), host_scores.data(), host_values.data(), key_num);
+
+  // 5. 将数据复制到设备内存
+  device_data.copy_keys(host_keys, key_num);
+  device_data.copy_values(host_values, key_num, dim);
+  device_data.copy_scores(host_scores, key_num);
+
+  // 6. 使用custom策略插入数据，指定分数
+  table->insert_or_assign(key_num, device_data.device_keys,
+                          device_data.device_values, device_data.device_scores,
+                          device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table->size(device_data.stream), key_num);
+
+  // 7. 验证插入结果：查询并检查值和分数
+  table->find(key_num, device_data.device_keys, device_data.device_values,
+              device_data.device_found, device_data.device_scores,
+              device_data.stream);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+
+  vector<V> host_result_values(key_num * dim);
+  bool* host_result_found = nullptr;
+  vector<S> host_result_scores(key_num);
+
+  ASSERT_EQ(aclrtMallocHost(reinterpret_cast<void**>(&host_result_found),
+                            key_num * sizeof(bool)),
+            ACL_ERROR_NONE);
+
+  ASSERT_EQ(aclrtMemcpy(host_result_values.data(), key_num * dim * sizeof(V),
+                        device_data.device_values, key_num * dim * sizeof(V),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(host_result_found, key_num * sizeof(bool),
+                        device_data.device_found, key_num * sizeof(bool),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemcpy(host_result_scores.data(), key_num * sizeof(S),
+                        device_data.device_scores, key_num * sizeof(S),
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+
+  for (size_t i = 0; i < key_num; i++) {
+    EXPECT_TRUE(host_result_found[i])
+        << "Key " << host_keys[i] << " should be found";
+    for (size_t j = 0; j < dim; j++) {
+      EXPECT_EQ(host_result_values[i * dim + j], host_values[i * dim + j])
+          << "Value mismatch for key " << host_keys[i] << " at dim " << j;
+    }
+    EXPECT_EQ(host_result_scores[i], host_scores[i])
+        << "Score mismatch for key " << host_keys[i] << ": expected "
+        << host_scores[i] << ", got " << host_result_scores[i];
+  }
+
+  ASSERT_EQ(aclrtFreeHost(host_result_found), ACL_ERROR_NONE);
+
+  table->clear();
+}

@@ -906,8 +906,8 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM_2048) inline void write_key_vf(
   }
 }
 
-template <class K, class V>
-__global__ __vector__ void write_kernel_unlock(
+template <class K, class V, bool UNLOCK_KEY>
+__global__ __vector__ void write_kernel(
     uint32_t former_num, uint64_t former_core_move_num,
     uint64_t tail_core_move_num, uint32_t tile_size, uint32_t num_tiles,
     uint32_t dim, __gm__ K* keys, __gm__ V* values, uint64_t n,
@@ -964,21 +964,23 @@ __global__ __vector__ void write_kernel_unlock(
     }
   }
 
-  const uint32_t thread_all = THREAD_NUM_2048 * GetBlockNum();
+  if constexpr (UNLOCK_KEY) {
+    const uint32_t thread_all = THREAD_NUM_2048 * GetBlockNum();
 
-  asc_vf_call<write_key_vf<K>>(dim3{THREAD_NUM_2048}, n, keys, d_dst_keys,
-                               thread_all, GetBlockIdx());
+    asc_vf_call<write_key_vf<K>>(dim3{THREAD_NUM_2048}, n, keys, d_dst_keys,
+                                 thread_all, GetBlockIdx());
+  }
 }
 
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-          int32_t Strategy = -1, int32_t TILE_SIZE = 32>
+          bool MoveV, int32_t Strategy = -1, int32_t TILE_SIZE = 32>
 __simt_vf__ __aicore__
 LAUNCH_BOUND(THREAD_NUM_512) inline void upsert_kernel_vf(
     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
     uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
     __gm__ const K* keys, __gm__ const S* scores, S cur_score, uint64_t n,
-    __gm__ V* __gm__* d_dst_values, uint32_t thread_all, uint64_t global_epoch,
-    uint32_t block_index, uint32_t max_bucket_shift,
+    __gm__ V* values, __gm__ V* __gm__* d_dst_values, uint32_t thread_all,
+    uint64_t global_epoch, uint32_t block_index, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
   if (buckets == nullptr || buckets_size == nullptr || keys == nullptr) {
     return;
@@ -1033,9 +1035,16 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void upsert_kernel_vf(
       asc_atomic_add(bucket_size, 1);
     }
 
+    if constexpr (MoveV) {
+      copy_vector<V, TILE_SIZE>(values + key_idx * dim,
+                                bucket_vectors + key_pos * dim, dim, lane_id);
+    }
+
     // 4. 更新，解锁key
     if (lane_id == 0) {
-      d_dst_values[key_idx] = bucket_vectors + key_pos * dim;
+      if constexpr (!MoveV) {
+        d_dst_values[key_idx] = bucket_vectors + key_pos * dim;
+      }
       ScoreFunctor::update_with_digest(
           bucket_keys, key_pos, scores, key_idx, score, bucket_max_size,
           get_digest<K>(key), (occupy_result != OccupyResult::DUPLICATE));
@@ -1047,11 +1056,11 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void upsert_kernel_vf(
   }
 }
 
-template <class K, class V, class S, int Strategy = -1>
+template <class K, class V, class S, bool MoveV, int Strategy = -1>
 __global__ __vector__ void upsert_kernel(
     __gm__ Bucket<K, V, S>* buckets, __gm__ int* buckets_size,
     uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
-    __gm__ const K* keys, __gm__ const S* scores, uint64_t n,
+    __gm__ const K* keys, __gm__ const S* scores, uint64_t n, __gm__ V* values,
     __gm__ V* __gm__* d_dst_values, uint64_t global_epoch,
     uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
     uint64_t capacity_divisor_shift) {
@@ -1061,10 +1070,10 @@ __global__ __vector__ void upsert_kernel(
                            ? static_cast<uint64_t>(GetSystemCycle())
                            : 0;
 
-  asc_vf_call<upsert_kernel_vf<K, V, S, Strategy>>(
+  asc_vf_call<upsert_kernel_vf<K, V, S, MoveV, Strategy>>(
       dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
-      capacity, bucket_max_size, dim, keys, scores, cur_score, n, d_dst_values,
-      thread_all, global_epoch, GetBlockIdx(), max_bucket_shift,
+      capacity, bucket_max_size, dim, keys, scores, cur_score, n, values,
+      d_dst_values, thread_all, global_epoch, GetBlockIdx(), max_bucket_shift,
       capacity_divisor_magic, capacity_divisor_shift);
 }
 
