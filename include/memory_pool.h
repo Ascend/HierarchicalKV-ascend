@@ -538,7 +538,7 @@ class MemoryPool final {
     // This check is a last resort, and may not work reliably. The recommended
     // best practice is to simply ensure streams you use are alive and well.
     aclrtStreamStatus status;
-    if (aclrtStreamQuery(stream, &status) != 0) {
+    if (aclrtStreamQuery(stream, &status) == 0) {
       for (; first != last; ++first) {
         // Avoid adding already deallocated buffers.
         if (*first == nullptr) {
