@@ -91,6 +91,8 @@ constexpr uint32_t DOUBLE_BUFFER = 2;
 
 constexpr uint32_t TRIPLE_BUFFER = 3;
 
+constexpr uint32_t DYNAMIC_UB_SIZE = 16 * 1024;
+
 template <typename K>
 __forceinline__ __simt_callee__ D empty_digest() {
   const K hashed_key = Murmur3HashDevice(static_cast<K>(EMPTY_KEY));

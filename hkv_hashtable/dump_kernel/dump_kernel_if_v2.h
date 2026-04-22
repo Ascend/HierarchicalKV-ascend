@@ -34,16 +34,16 @@
  namespace hkv {
  using namespace AscendC;
 
- template <class K, class V, class S, class VecV, class PredFunctor, int32_t GROUP_SIZE>
+ template <class K, class V, class S, class VecV, class PredFunctor,
+           int32_t GROUP_SIZE>
  __simt_vf__ __aicore__
  LAUNCH_BOUND(THREAD_NUM_2048) inline void dump_kernel_if_v2_vf(
      PredFunctor pred, __gm__ Table<K, V, S>* table,
      __gm__ Bucket<K, V, S>* buckets, __gm__ K* d_key, __gm__ V* d_val,
      __gm__ S* d_score, const size_t offset, const size_t search_length,
-     const size_t search_length_align, const uint64_t total_thread_num,
-     __gm__ size_t* dump_counter, uint64_t ub_shared_kvs_mem,
-     __ubuf__ uint32_t* block_acc, __ubuf__ size_t* global_acc,
-     uint32_t dim_in, uint32_t blockIdx) {
+     const uint64_t total_thread_num, __gm__ size_t* dump_counter,
+     uint64_t ub_shared_kvs_mem, __ubuf__ uint32_t* block_acc,
+     __ubuf__ size_t* global_acc, uint32_t dim_in, uint32_t blockIdx) {
    if ((!table) || (!buckets) || (!d_key) || (!d_val) || (!dump_counter)) {
      return;
    }
@@ -51,6 +51,7 @@
    auto block_tuples =
        reinterpret_cast<__ubuf__ KVM<K, S>*>(ub_shared_kvs_mem);
    __gm__ VecV* __restrict__ d_vecv_val = reinterpret_cast<__gm__ VecV*>(d_val);
+   const size_t search_length_align = ((search_length + warpSize - 1) / warpSize) * warpSize;
  
    const size_t bucket_max_size{table->bucket_max_size};
  
@@ -128,8 +129,7 @@
      PredFunctor pred, __gm__ Table<K, V, S>* table,
      __gm__ Bucket<K, V, S>* buckets, __gm__ K* keys, __gm__ V* vals,
      __gm__ S* scores, const size_t offset, const size_t search_length,
-     const size_t search_length_align, __gm__ size_t* dump_counter,
-     uint32_t value_size, uint32_t dim) {
+     __gm__ size_t* dump_counter, uint32_t value_size, uint32_t dim) {
    const uint64_t total_thread_num = THREAD_NUM_2048 * GetBlockNum();
  
    AscendC::TPipe pipe;
@@ -159,11 +159,101 @@
        (asc_vf_call<
            dump_kernel_if_v2_vf<K, V, S, DTYPE, PredFunctor, GROUP_SIZE>>(
            dim3{static_cast<uint32_t>(THREAD_NUM_2048)}, pred, table, buckets,
-           keys, vals, scores, offset, search_length, search_length_align,
-           total_thread_num, dump_counter, shared_kvs_tensor.GetPhyAddr(),
+           keys, vals, scores, offset, search_length, total_thread_num,
+           dump_counter, shared_kvs_tensor.GetPhyAddr(),
            ub_shared_block_acc_mem, ub_shared_global_acc_mem, dim,
            GetBlockIdx())));
  }
+
+ template <class K, class V, class S, class PredFunctor, int32_t GROUP_SIZE = 32>
+ __simt_vf__ __aicore__
+ LAUNCH_BOUND(THREAD_NUM_2048) inline void dump_kernel_if_v2_hybrid_vf(
+     PredFunctor pred, __gm__ Table<K, V, S>* table,
+     __gm__ Bucket<K, V, S>* buckets, __gm__ K* d_key,
+     __gm__ V * __gm__ * dst_val, __gm__ S* d_score, const size_t offset,
+     const size_t search_length, const uint64_t total_thread_num,
+     __gm__ size_t* d_dump_counter, __ubuf__ uint32_t* block_acc,
+     __ubuf__ uint32_t* global_acc, uint32_t dim_in, uint32_t blockIdx) {
+   if ((!table) || (!buckets) || (!d_key) || (!dst_val) || (!d_dump_counter)) {
+     return;
+   }
+
+   const size_t bucket_max_size{table->bucket_max_size};
+   size_t tid{blockIdx * blockDim.x + threadIdx.x};
+   for (; tid < search_length; tid += total_thread_num) {
+     if (threadIdx.x == 0) {
+       block_acc[0] = 0;
+     }
+     asc_syncthreads();
+     uint32_t choose_flag = 0;
+     size_t local_index = 0;
+     __gm__ Bucket<K, V, S>* bucket =
+         buckets + (tid + offset) / bucket_max_size;
+     __gm__ K* bucket_keys_ptr = bucket->keys_;
+     __gm__ V* bucket_values_ptr = bucket->vectors;
+     __gm__ S* bucket_scores_ptr = bucket->scores_;
+
+     const int key_idx{static_cast<int>((tid + offset) % bucket_max_size)};
+     const K key{bucket_keys_ptr[key_idx]};
+     __gm__ V* value_ptrs = &bucket_values_ptr[key_idx * dim_in];
+     S score{bucket_scores_ptr[key_idx]};
+     bool match = pred.template operator()<GROUP_SIZE>(key, value_ptrs, score);
+     if (match) {
+       choose_flag = 1;
+       local_index = atomicAdd(block_acc, 1u);
+     }
+     asc_syncthreads();
+
+     if (threadIdx.x == 0) {
+       global_acc[0] =
+           atomicAdd(d_dump_counter, static_cast<size_t>(block_acc[0]));
+     }
+     asc_syncthreads();
+
+     if (choose_flag == 1) {
+       const size_t j{global_acc[0] + local_index};
+       d_key[j] = key;
+       dst_val[j] = value_ptrs;
+
+       if (d_score != nullptr) {
+         d_score[j] = score;
+       }
+     }
+   }
+ }
+
+ template <class K, class V, class S, class PredFunctor, int32_t GROUP_SIZE = 32>
+ __global__ __vector__ void dump_kernel_if_v2_hybrid(
+     PredFunctor pred, __gm__ Table<K, V, S>* table,
+     __gm__ Bucket<K, V, S>* buckets, __gm__ K* keys,
+     __gm__ V * __gm__ * src_vals, __gm__ S* scores, const size_t offset,
+     const size_t search_length, __gm__ size_t* dump_counter, uint32_t dim) {
+   const uint64_t total_thread_num = THREAD_NUM_2048 * GetBlockNum();
+ 
+   AscendC::TPipe pipe;
+
+   AscendC::TBuf<AscendC::TPosition::VECCALC> block_acc;
+   pipe.InitBuffer(block_acc, sizeof(uint32_t));
+   AscendC::LocalTensor<uint32_t> shared_block_acc_tensor =
+       block_acc.Get<uint32_t>();
+   __ubuf__ uint32_t* ub_shared_block_acc_mem =
+       reinterpret_cast<__ubuf__ uint32_t*>(
+           shared_block_acc_tensor.GetPhyAddr());
+ 
+   AscendC::TBuf<AscendC::TPosition::VECCALC> global_acc;
+   pipe.InitBuffer(global_acc, sizeof(uint32_t));
+   AscendC::LocalTensor<uint32_t> shared_global_acc_tensor =
+       global_acc.Get<uint32_t>();
+   __ubuf__ uint32_t* ub_shared_global_acc_mem =
+       reinterpret_cast<__ubuf__ uint32_t*>(
+           shared_global_acc_tensor.GetPhyAddr());
+
+   asc_vf_call<dump_kernel_if_v2_hybrid_vf<K, V, S, PredFunctor, GROUP_SIZE>>(
+       dim3{static_cast<uint32_t>(THREAD_NUM_2048)}, pred, table, buckets, keys,
+       src_vals, scores, offset, search_length, total_thread_num, dump_counter,
+       ub_shared_block_acc_mem, ub_shared_global_acc_mem, dim, GetBlockIdx());
+ }
+
  }  // namespace hkv
  }  // namespace npu
  
