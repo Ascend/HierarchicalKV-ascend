@@ -388,4 +388,65 @@ template <typename K, typename V, typename S>
 std::unique_ptr<npu::hkv::HashTable<K, V, S>> get_default_table() {
   return get_table<K, V, S>(DEFAULT_DIM, DEFAULT_CAPACITY, 1);
 }
+
+// 辅助函数：使用 key 初始化 values
+template <class K, class V>
+void init_value_using_key(K* h_keys, V* h_vectors, const size_t key_num,
+                          size_t dim) {
+  for (size_t i = 0; i < key_num; i++) {
+    for (size_t j = 0; j < dim; j++) {
+      h_vectors[i * dim + j] = static_cast<V>(h_keys[i] * 0.00001);
+    }
+  }
+}
+
+// 辅助函数：验证两个 bool 数组是否完全相等
+inline bool allEqualGpu(const bool* d_array1, const bool* d_array2,
+                        size_t size, aclrtStream stream) {
+  std::vector<char> h_array1(size);
+  std::vector<char> h_array2(size);
+
+  HKV_EXPECT_TRUE(
+      (aclrtMemcpy(h_array1.data(), size * sizeof(char), const_cast<bool*>(d_array1),
+                   size * sizeof(char), ACL_MEMCPY_DEVICE_TO_HOST) == ACL_ERROR_NONE),
+      "aclrtMemcpy device to host failed");
+
+  HKV_EXPECT_TRUE(
+      (aclrtMemcpy(h_array2.data(), size * sizeof(char), const_cast<bool*>(d_array2),
+                   size * sizeof(char), ACL_MEMCPY_DEVICE_TO_HOST) == ACL_ERROR_NONE),
+      "aclrtMemcpy device to host failed");
+
+  HKV_EXPECT_TRUE((aclrtSynchronizeStream(stream) == ACL_ERROR_NONE),
+                  "aclrtSynchronizeStream failed");
+
+  for (size_t i = 0; i < size; i++) {
+    if (h_array1[i] != h_array2[i]) {
+      std::cout << "Mismatch at index " << i << ": " << (int)h_array1[i]
+                << " != " << (int)h_array2[i] << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+// 辅助函数：验证 bool 数组是否全为 true
+inline bool allTrueGpu(const bool* d_array, size_t size, aclrtStream stream) {
+  std::vector<char> h_array(size);
+
+  HKV_EXPECT_TRUE(
+      (aclrtMemcpy(h_array.data(), size * sizeof(char), const_cast<bool*>(d_array),
+                   size * sizeof(char), ACL_MEMCPY_DEVICE_TO_HOST) == ACL_ERROR_NONE),
+      "aclrtMemcpy device to host failed");
+
+  HKV_EXPECT_TRUE((aclrtSynchronizeStream(stream) == ACL_ERROR_NONE),
+                  "aclrtSynchronizeStream failed");
+
+  for (size_t i = 0; i < size; i++) {
+    if (!h_array[i]) {
+      std::cout << "False found at index " << i << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
 }  // namespace test_util

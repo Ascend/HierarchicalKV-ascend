@@ -38,7 +38,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void lock_keys_kernel_vf(
     uint64_t thread_all, uint32_t block_index,
     uint32_t max_bucket_shift, uint64_t capacity_divisor_magic,
     uint64_t capacity_divisor_shift) {
-  if (!buckets && !keys && !locked_keys_ptrs && !succeed) {
+  if (!buckets || !keys || !locked_keys_ptrs || !succeed) {
     return;
   }
 

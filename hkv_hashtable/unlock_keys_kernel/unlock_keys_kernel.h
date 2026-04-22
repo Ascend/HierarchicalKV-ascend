@@ -43,7 +43,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void unlock_keys_kernel_vf(
     uint64_t n, __gm__ K* __gm__* locked_key_ptrs,
     __gm__ const K* keys, __gm__ bool* succeededs,
     uint64_t thread_all, uint32_t block_index) {
-  if (!locked_key_ptrs && !keys) {
+  if (!locked_key_ptrs || !keys) {
     return;
   }
 
