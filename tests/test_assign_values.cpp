@@ -1319,7 +1319,7 @@ void test_ddr_assign_values_dim_basic(size_t dim, bool io_by_cpu = false) {
   EXPECT_EQ(table->size(), 0);
 
   // 2. 申请hbm内存
-  constexpr size_t key_num = 128;
+  constexpr size_t key_num = 1024;
   DeviceData<K, V, S> device_data;
   device_data.malloc(key_num, dim);
 
@@ -1334,7 +1334,7 @@ void test_ddr_assign_values_dim_basic(size_t dim, bool io_by_cpu = false) {
                           device_data.device_values, nullptr,
                           device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
-  EXPECT_EQ(table->size(device_data.stream), key_num);
+  EXPECT_EQ(table->size(device_data.stream), capacity);
 
   // 4. 使用 assign_values 更新 values
   vector<V> new_values(key_num * dim, 0);
@@ -1351,7 +1351,7 @@ void test_ddr_assign_values_dim_basic(size_t dim, bool io_by_cpu = false) {
               device_data.device_found, nullptr, device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
 
-  check_result(new_values, key_num, device_data, key_num, dim);
+  check_result(new_values, key_num, device_data, capacity, dim);
 }
 
 TEST_F(AssignValuesTest, test_ddr_dim_8) { test_ddr_assign_values_dim_basic(8); }

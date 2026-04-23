@@ -1177,7 +1177,7 @@ void test_ddr_assign_dim_basic(size_t dim, bool io_by_cpu = false) {
   EXPECT_EQ(table->size(), 0);
 
   // 2. 申请hbm内存
-  constexpr size_t key_num = 128;
+  constexpr size_t key_num = 1024;
   DeviceData<K, V, S> device_data;
   device_data.malloc(key_num, dim);
 
@@ -1195,7 +1195,7 @@ void test_ddr_assign_dim_basic(size_t dim, bool io_by_cpu = false) {
                           device_data.device_values, device_data.device_scores,
                           device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
-  EXPECT_EQ(table->size(device_data.stream), key_num);
+  EXPECT_EQ(table->size(device_data.stream), capacity);
 
   // 4. 使用 assign_values 更新 values
   vector<V> new_values(key_num * dim, 0);
@@ -1239,10 +1239,12 @@ void test_ddr_assign_dim_basic(size_t dim, bool io_by_cpu = false) {
                         device_data.device_scores, key_num * sizeof(S),
                         ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
-
+  size_t found_cnt = 0;
   for (size_t i = 0; i < key_num; i++) {
-    EXPECT_TRUE(host_result_found[i])
-        << "Key " << host_keys[i] << " should be found";
+    if (!host_result_found[i]) {
+      continue;
+    }
+    found_cnt++;
     for (size_t j = 0; j < dim; j++) {
       EXPECT_EQ(host_result_values[i * dim + j], new_values[i * dim + j])
           << "Value mismatch for key " << host_keys[i] << " at dim " << j;
@@ -1251,7 +1253,8 @@ void test_ddr_assign_dim_basic(size_t dim, bool io_by_cpu = false) {
         << "Score mismatch for key " << host_keys[i] << ": expected "
         << new_scores[i] << ", got " << host_result_scores[i];
   }
-
+  EXPECT_EQ(found_cnt, capacity) << "Found key count "
+      << found_cnt << ", but expected " << capacity;
   ASSERT_EQ(aclrtFreeHost(host_result_found), ACL_ERROR_NONE);
 
   table->clear();

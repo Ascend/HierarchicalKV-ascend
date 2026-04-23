@@ -625,24 +625,13 @@ void print_title_b() {
   cout << "|\n";
 }
 
-void print_title_a_static() {
-  cout << endl
-       << "|    \u03BB "
-       << "| find_or_insert ";
-  cout << "|\n";
-
-  //<< "| load_factor "
-  cout << "|-----:"
-       //<< "| find_or_insert "
-       << "|---------------:";
-  cout << "|\n";
-}
-
 void print_title_hybrid_a() {
   cout << endl
        << "|    \u03BB "
        << "| insert_or_assign "
        << "|   find "
+       << "| assign "
+       << "| assign_values "
        << "|\n";
 
   //<< "| load_factor "
@@ -651,6 +640,10 @@ void print_title_hybrid_a() {
        << "|-----------------:"
        //<< "|   find "
        << "|-------:"
+       //<< "| assign "
+       << "|-------:"
+       //<< "| assign_values "
+       << "|--------------:"
        << "|\n";
 }
 
@@ -883,6 +876,8 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
       std::vector<API_Select> apis_a{
         API_Select::insert_or_assign,
         API_Select::find,
+        API_Select::assign,
+        API_Select::assign_values,
       };
 
       std::vector<API_Select> apis_b{

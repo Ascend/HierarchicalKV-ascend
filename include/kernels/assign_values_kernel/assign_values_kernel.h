@@ -174,7 +174,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_digest_vf(
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
           int32_t TILE_SIZE = 32, bool IS_FAST_MODE>
 __simt_vf__ __aicore__
-LAUNCH_BOUND(THREAD_NUM_1024) inline void assign_values_kernel_with_io_vf(
+LAUNCH_BOUND(THREAD_NUM_512) inline void assign_values_kernel_with_io_vf(
     __gm__ Bucket<K, V, S>* buckets, uint64_t capacity,
     uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
     uint64_t n, uint32_t thread_all, uint32_t block_index,
@@ -349,10 +349,9 @@ __global__ __vector__ void assign_values_kernel_with_io(
     uint32_t bucket_max_size, uint32_t dim, __gm__ K* keys, __gm__ V* values,
     uint64_t n, __gm__ V* __gm__* d_dst_values, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
-  constexpr uint32_t thread_num = 1024;
-  const uint32_t thread_all = thread_num * GetBlockNum();
+  const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
   asc_vf_call<assign_values_kernel_with_io_vf<K, V, S, 32, IS_FAST_MODE>>(
-      dim3{static_cast<uint32_t>(thread_num)}, buckets, capacity,
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, capacity,
       bucket_max_size, dim, keys, values, n, thread_all, GetBlockIdx(),
       d_dst_values, max_bucket_shift, capacity_divisor_magic,
       capacity_divisor_shift);
