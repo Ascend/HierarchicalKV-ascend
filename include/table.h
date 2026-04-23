@@ -174,6 +174,8 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
       (*table)->remaining_hbm_for_vectors -= slice_real_size;
     } else {
       (*table)->is_pure_hbm = false;
+      const size_t host_min_size = MB(2);
+      slice_real_size = std::max(host_min_size, slice_real_size);
       allocator->alloc(MemoryType::Pinned, (void**)&((*table)->slices[i]),
                        slice_real_size);
       // 申请的host内存地址和映射后的地址相同，因此使用host地址即可
@@ -272,7 +274,9 @@ size_t get_slice_size(Table<K, V, S>** table) {
     slice_size = min_slice_size;
   }
 
-  return std::max(min_slice_size, slice_size);
+  // host register限制约束最小为2M，因此统一使用最小2M对齐
+  const size_t host_align_size = MB(2);
+  return std::max(std::max(min_slice_size, slice_size), host_align_size);
 }
 
 /* Initialize a Table struct.
