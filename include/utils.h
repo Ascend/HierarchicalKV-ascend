@@ -28,7 +28,7 @@
 #include "kernel_operator.h"
 #include <acl/acl.h>
 #include <thread>
-#include "../hkv_hashtable/utils_kernel/utils_kernel.h"
+#include "kernels/utils_kernel/utils_kernel.h"
 #include "debug.h"
 
 namespace npu {

@@ -24,7 +24,7 @@
 #include <cstring>
 #include <vector>
 #include <acl/acl.h>
-#include "../hkv_hashtable/init_table_kernel/init_table_kernel.h"
+#include "kernels/init_table_kernel/init_table_kernel.h"
 #include "allocator.h"
 #include "debug.h"
 #include "utils.h"

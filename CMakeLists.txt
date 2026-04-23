@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-find_package(ASC REQUIRED)
-project(Ascend_c LANGUAGES ASC CXX)
 
+# 1. 启用ASC工程
+find_package(ASC REQUIRED)
+project(HierarchicalKV-ascend
+  LANGUAGES ASC CXX)
+
+# 2. cmake基础参数设置
 set(CMAKE_CXX_STANDARD 17)
-set(RUN_MODE "npu" CACHE STRING "sim/npu")
-set(ASCEND_CANN_PACKAGE_PATH "/usr/local/Ascend/ascend-toolkit/latest"
-  CACHE STRING "ASCEND CANN package installation directory"
-)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Build type Release/Debug (default Debug)" FORCE)
 endif()
@@ -14,93 +14,33 @@ if(CMAKE_INSTALL_PREFIX STREQUAL /usr/local)
   set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/out" CACHE STRING "path for install()" FORCE)
 endif()
 
-add_library(hkv_includes INTERFACE)
-target_include_directories(hkv_includes INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
-add_compile_options(-std=c++17)
-
-set_source_files_properties(
-  ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
-  PROPERTIES LANGUAGE ASC
-)
-
-add_executable(hkv_demo ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
-
-target_compile_options(hkv_demo PRIVATE
-    # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
-    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
-    -g -O2
-)
-
-target_link_libraries(hkv_demo PRIVATE
+# 3. hkv依赖库
+set(hkv_intf ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(hkv_depends INTERFACE)
+target_include_directories(hkv_depends INTERFACE ${hkv_intf})
+target_link_libraries(hkv_depends INTERFACE
+  # c++
   m
-  graph_base
-  tiling_api
-  register
-  platform
-  ascendalog
-  dl
-  hkv_includes
-  opapi
-  nnopbase
-  pthread
-)
+  dl # platform依赖
 
-add_executable(hkv_benchmark
-  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
+  # cann
+  tiling_api # platform
+  platform # fe::platform
+  opapi # aclnnApi
+  nnopbase # aclTensor
+  pthread # platform依赖
 )
-
-target_compile_options(hkv_benchmark PRIVATE
-    # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
-    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
-    -g -O2
-    -mllvm -disable-machine-licm
-    --cce-res-usage
-)
-
-target_link_libraries(hkv_benchmark PRIVATE
-  m
-  graph_base
-  tiling_api
-  register
-  platform
-  ascendalog
-  dl
-  hkv_includes
-  opapi
-  nnopbase
-  pthread
-)
-
-add_executable(hkv_benchmark_find_miss
-  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
-)
-
-target_compile_options(hkv_benchmark_find_miss PRIVATE
+target_compile_options(hkv_depends INTERFACE
+  # 该NPU架构版本号暂未正式发布，后续可能会有变更，请关注正式版本发布信息
   $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
   -g -O2
+  # 优化SIMT算子寄存器数
   -mllvm -disable-machine-licm
+  # 打印寄存器使用情况
   --cce-res-usage
 )
 
-target_link_libraries(hkv_benchmark_find_miss PRIVATE
-  m
-  graph_base
-  tiling_api
-  register
-  platform
-  ascendalog
-  dl
-  hkv_includes
-  opapi
-  nnopbase
-  pthread
-)
-
+# 4. 测试工程
 if(ENABLE_TEST STREQUAL 1)
   enable_testing()
   set(INSTALL_GTEST OFF CACHE BOOL "Disable installation of GTest" FORCE)
@@ -109,9 +49,28 @@ if(ENABLE_TEST STREQUAL 1)
   add_subdirectory(tests)
 endif()
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include
-  DESTINATION ./
+# 5. 编译示例
+set_source_files_properties(
+  ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
+  PROPERTIES LANGUAGE ASC
 )
+
+add_executable(hkv_demo ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
+target_link_libraries(hkv_demo PRIVATE hkv_depends)
+
+add_executable(hkv_benchmark
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/hkv_hashtable_benchmark.cpp
+)
+target_link_libraries(hkv_benchmark PRIVATE hkv_depends)
+
+add_executable(hkv_benchmark_find_miss
+  ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark_find_miss.cpp
+)
+target_link_libraries(hkv_benchmark_find_miss PRIVATE hkv_depends)
+
+# 6. 安装二进制
 install(TARGETS hkv_demo
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

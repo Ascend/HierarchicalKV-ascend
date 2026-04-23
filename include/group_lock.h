@@ -24,7 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include "../hkv_hashtable/utils_kernel/group_lock_kernel.h"
+#include "kernels/utils_kernel/group_lock_kernel.h"
 #include "debug.h"
 
 namespace npu {

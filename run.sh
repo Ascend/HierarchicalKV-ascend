@@ -10,7 +10,6 @@ SHORT=h,r:,i:,b:,p:,d:,c,t:,g
 LONG=help,run-mode:,install-path:,build-type:,install-prefix:,device:,compile-only,enable-test:,skip-disabled-test
 OPTS=$(getopt -a --options $SHORT --longoptions $LONG -- "$@")
 eval set -- "$OPTS"
-SOC_VERSION="Ascend950PR_9579"
 COMPILE_ONLY=0
 ENABLE_TEST=1
 RUN_MODE="npu"
@@ -88,9 +87,9 @@ while :; do
     esac
 done
 
-RUN_MODE_LIST="sim npu"
+RUN_MODE_LIST="npu"
 if [[ " $RUN_MODE_LIST " != *" $RUN_MODE "* ]]; then
-    echo "[ERROR]: RUN_MODE error, This sample only support specify sim or npu!"
+    echo "[ERROR]: RUN_MODE error, This sample only support specify npu!"
     exit -1
 fi
 
@@ -111,23 +110,15 @@ echo "_ASCEND_INSTALL_PATH [$_ASCEND_INSTALL_PATH]"
 
 export ASCEND_TOOLKIT_HOME=${_ASCEND_INSTALL_PATH}
 export ASCEND_HOME_PATH=${_ASCEND_INSTALL_PATH}
-echo "[INFO]: Current compile soc version is ${SOC_VERSION}"
 source ${_ASCEND_INSTALL_PATH}/bin/setenv.bash
-if [ "${RUN_MODE}" = "sim" ]; then
-    # in case of running op in simulator, use stub .so instead
-    export LD_LIBRARY_PATH=${_ASCEND_INSTALL_PATH}/tools/simulator/${SOC_VERSION}/lib:$LD_LIBRARY_PATH
-fi
 
 set -e
 rm -rf build ${INSTALL_PREFIX}
 mkdir -p build
 cmake -B build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-    -DRUN_MODE=${RUN_MODE} \
-    -DSOC_VERSION=${SOC_VERSION} \
     -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
     -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
-    -DASCEND_CANN_PACKAGE_PATH=${_ASCEND_INSTALL_PATH} \
     -DBUILD_SHARED_LIBS=ON \
     -DENABLE_TEST=${ENABLE_TEST}
 cmake --build build -j 16 --verbose
@@ -155,7 +146,3 @@ fi
     ${INSTALL_PREFIX}/bin/hkv_benchmark > hkv_benchmark_run.log
     ${INSTALL_PREFIX}/bin/hkv_demo > hkv_demo_run.log
 )
-# tidy folder by delete log files
-if [ "${RUN_MODE}" = "sim" ]; then
-    rm -f *.log *.dump *.vcd *.toml *_log
-fi

@@ -19,8 +19,8 @@
 #include <functional>
 #include "acl/acl.h"
 #include "test_score_functor_kernel.h"
-#include "../test_util.h"
-#include "../../include/types.h"
+#include "test_util.h"
+#include "types.h"
 
 using namespace std;
 using namespace npu::hkv;

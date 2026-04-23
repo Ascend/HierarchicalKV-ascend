@@ -24,7 +24,7 @@
 #include "hkv_hashtable.h"
 #include "test_util.h"
 #include "test_device_data.h"
-#include "../include/types.h"
+#include "types.h"
 
 using namespace std;
 using namespace npu::hkv;

@@ -19,8 +19,8 @@
 
 #include <cstdint>
 #include "kernel_operator.h"
-#include "../../include/types.h"
-#include "../../include/score_functor.h"
+#include "types.h"
+#include "score_functor.h"
 
 #define LAUNCH_BOUND(N) __attribute__((cce_launch_bounds(N)))
 

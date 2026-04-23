@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include "debug.h"
 #include "hkv_hashtable.h"
-#include "hkv_hashtable/utils_kernel/utils_kernel.h"
+#include "kernels/utils_kernel/utils_kernel.h"
 #include "tiling/platform/platform_ascendc.h"
 
 using std::cerr;
