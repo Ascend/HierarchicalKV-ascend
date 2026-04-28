@@ -570,7 +570,7 @@ void print_title_a() {
        << "| find_or_insert* "
        << "| find_and_update "
        << "|   find* "
-       << "| export_batch "
+       << "| find_or_insert "
        << "| assign "
        << "| assign_scores "
        << "| assign_values ";
@@ -592,8 +592,8 @@ void print_title_a() {
        << "|----------------:"
        //<< "|   find* "
        << "|--------:"
-       //<< "| export_batch "
-       << "|-------------:"
+       //<< "| find_or_insert "
+       << "|---------------:"
        //<< "| assign "
        << "|-------:"
        //<< "| assign_scores "
@@ -612,12 +612,15 @@ void print_title_a() {
 void print_title_b() {
   cout << endl
        << "|    \u03BB "
+       << "| export_batch "
        << "| export_batch_if_v2 "
        << "| export_batch_if ";
   cout << "|\n";
 
   //<< "| load_factor "
   cout << "|-----:"
+       //<< "| export_batch "
+       << "|-------------:"
        //<< "| export_batch_if_v2 "
        << "|-------------------:"
        //<< "| export_batch_if "
@@ -713,6 +716,10 @@ void test_main(std::vector<API_Select>& apis, const size_t dim,
           // 空格数量为：列宽长度-7，如insert_or_assign的列宽长度为: insert_or_assign ,共18个字符，
           // 所以空格数量为18-7=11，具体列宽长度见print_title_a()
           std::cout << rep(11);
+          break;
+        }
+        case API_Select::find_or_insert: {
+          std::cout << rep(9);
           break;
         }
         case API_Select::find: {
@@ -813,7 +820,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::find_or_insert_ptr,
         API_Select::find_and_update,
         API_Select::find_ptr,
-        API_Select::export_batch,
+        API_Select::find_or_insert,
         API_Select::assign,
         API_Select::assign_scores,
         API_Select::assign_values,
@@ -821,6 +828,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
         API_Select::contains,
       };
       std::vector<API_Select> apis_b{
+        API_Select::export_batch,
         API_Select::export_batch_if_v2,
         API_Select::export_batch_if,
       };

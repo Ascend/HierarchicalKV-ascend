@@ -48,6 +48,7 @@
 #include "kernels/assign_scores_kernel/assign_scores_kernel_with_filter.h"
 #include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
 #include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel.h"
+#include "kernels/find_or_insert_kernel/find_or_insert_kernel.h"
 #include "kernels/insert_or_assign_kernel/insert_or_assign_kernel.h"
 #include "tiling_helper.h"
 #include "kernels/lock_keys_kernel/lock_keys_kernel.h"
@@ -1525,12 +1526,33 @@ class HashTable : public HashTableBase<K, V, S> {
       return;
     }
 
+    while (!reach_max_capacity_ &&
+           fast_load_factor(n, stream) > options_.max_load_factor) {
+      reserve(capacity() * 2, stream);
+    }
+
+    if (!ignore_evict_strategy) {
+      check_evict_strategy(scores);
+    }
+
     std::unique_ptr<insert_unique_lock> lock_ptr;
     if (options_.api_lock) {
       lock_ptr = std::make_unique<insert_unique_lock>(mutex_, stream);
     }
 
-    std::cout << "[Unsupport find_or_insert yet]\n";
+    if (is_fast_mode()) {
+      if (unique_key) {
+        DISPATCH_GROUP_SIZE(
+            value_move_opt_.cg_size,
+            (find_or_insert_kernel<K, V, S, GROUP_SIZE, evict_strategy>
+             <<<block_dim_, 0, stream>>>(
+                 table_->buckets, table_->buckets_size,
+                 options_.max_bucket_size, value_move_opt_.dim, keys, values,
+                 scores, n, global_epoch_, value_move_opt_.size,
+                 table_->max_bucket_shift, table_->capacity_divisor_magic,
+                 table_->capacity_divisor_shift, table_->capacity)));
+      }
+    }
 
     NpuCheckError();
   }
