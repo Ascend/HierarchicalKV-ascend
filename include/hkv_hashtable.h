@@ -1551,6 +1551,14 @@ class HashTable : public HashTableBase<K, V, S> {
                  scores, n, global_epoch_, value_move_opt_.size,
                  table_->max_bucket_shift, table_->capacity_divisor_magic,
                  table_->capacity_divisor_shift, table_->capacity)));
+      } else {
+        find_or_insert_non_unique_kernel<K, V, S, true, evict_strategy>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->buckets_size, table_->capacity,
+                options_.max_bucket_size, options_.dim, keys, scores, n,
+                values, nullptr, nullptr, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift);
       }
     }
 

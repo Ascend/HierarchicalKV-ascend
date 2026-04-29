@@ -333,6 +333,123 @@
            cur_score, GetBlockIdx(), thread_all, max_bucket_shift,
            capacity_divisor_magic, capacity_divisor_shift, capacity)));
  }
+
+ template <typename K = uint64_t, typename V = float, typename S = uint64_t,
+           bool MoveV, int Strategy = -1, int32_t TILE_SIZE = 32>
+ __simt_vf__ __aicore__
+ LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_non_unique_kernel_vf(
+     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
+     uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+     __gm__ const K* keys, __gm__ const S* scores, S cur_score, uint64_t n,
+     __gm__ V* values, __gm__ V * __gm__ * d_dst_values,
+     __gm__ bool* founds, uint32_t thread_all, uint64_t global_epoch,
+     uint32_t block_index, uint32_t max_bucket_shift,
+     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
+   if (buckets == nullptr || buckets_size == nullptr || keys == nullptr) {
+     return;
+   }
+   if constexpr (!MoveV) {
+     if ((!d_dst_values) || (!founds)) {
+       return;
+     }
+   }
+   using BUCKET = Bucket<K, V, S>;
+   using ScoreFunctor = ScoreFunctor<K, V, S, Strategy>;
+
+   auto lane_id = threadIdx.x % TILE_SIZE;
+   const uint64_t N = n * TILE_SIZE;
+
+   for (uint64_t t = block_index * blockDim.x + threadIdx.x; t < N;
+        t += thread_all) {
+     uint64_t key_idx = t / TILE_SIZE;
+
+     K key = keys[key_idx];
+     if (IS_RESERVED_KEY<K>(key)) {
+       continue;
+     }
+     S score = ScoreFunctor::desired_when_missed(scores, key_idx, global_epoch,
+                                                 cur_score);
+
+     // 1. 计算 hash 值，定位 bucket
+     const K hashed_key = Murmur3HashDevice(key);
+     uint64_t global_idx = get_global_idx(hashed_key, capacity_divisor_magic,
+                                          capacity_divisor_shift, capacity);
+     uint32_t key_pos = global_idx & (bucket_max_size - 1);
+     uint64_t bkt_idx = global_idx >> max_bucket_shift;
+
+     __gm__ int32_t* bucket_size = buckets_size + bkt_idx;
+     __gm__ Bucket<K, V, S>* bucket = buckets + bkt_idx;
+     __gm__ K* bucket_keys = bucket->keys_;
+     __gm__ V* bucket_vectors = bucket->vectors;
+     __gm__ S* bucket_scores = bucket->scores_;
+
+     // 2. 32 线程协作查找 key / 空位 / 淘汰
+     K evicted_key = static_cast<K>(EMPTY_KEY);
+     OccupyResult occupy_result;
+     do {
+       occupy_result = find_and_lock<K, S, TILE_SIZE>(
+           bucket_keys, bucket_scores, bucket_max_size, key, score, key_pos,
+           evicted_key, lane_id);
+     } while (occupy_result == OccupyResult::CONTINUE);
+
+     if (occupy_result == OccupyResult::REFUSED) {
+       continue;
+     }
+
+     // 3. 新插入位置需要更新 bucket_size
+     if ((occupy_result == OccupyResult::OCCUPIED_EMPTY ||
+          occupy_result == OccupyResult::OCCUPIED_RECLAIMED) &&
+         lane_id == 0) {
+       asc_atomic_add(bucket_size, 1);
+     }
+
+     if constexpr (MoveV) {
+       if (occupy_result == OccupyResult::DUPLICATE) {
+         copy_vector<V, TILE_SIZE>(bucket_vectors + key_pos * dim,
+                                   values + key_idx * dim, dim, lane_id);
+       } else {
+         copy_vector<V, TILE_SIZE>(values + key_idx * dim,
+                                   bucket_vectors + key_pos * dim, dim,
+                                   lane_id);
+       }
+     }
+
+     // 4. 更新，解锁key
+     if (lane_id == 0) {
+       if constexpr (!MoveV) {
+         d_dst_values[key_idx] = bucket_vectors + key_pos * dim;
+         founds[key_idx] = occupy_result != OccupyResult::DUPLICATE;
+       }
+       ScoreFunctor::update_with_digest(
+           bucket_keys, key_pos, scores, key_idx, score, bucket_max_size,
+           get_digest<K>(key), (occupy_result != OccupyResult::DUPLICATE));
+       asc_threadfence();
+       (void)asc_atomic_exch(bucket_keys + key_pos, key);
+     }
+   }
+ }
+
+ template <class K, class V, class S, bool MoveV, int Strategy = -1>
+ __global__ __vector__ void find_or_insert_non_unique_kernel(
+     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
+     uint64_t capacity, uint32_t bucket_max_size, uint32_t dim,
+     __gm__ const K* keys, __gm__ const S* scores, uint64_t n, __gm__ V* values,
+     __gm__ V * __gm__ * d_dst_values, __gm__ bool* founds,
+     uint64_t global_epoch, uint32_t max_bucket_shift,
+     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift) {
+   const uint32_t thread_all = THREAD_NUM_512 * GetBlockNum();
+   uint64_t cur_score = (Strategy == npu::hkv::EvictStrategyInternal::kLru ||
+                         Strategy == npu::hkv::EvictStrategyInternal::kEpochLru)
+                            ? static_cast<uint64_t>(GetSystemCycle())
+                            : 0;
+
+   asc_vf_call<find_or_insert_non_unique_kernel_vf<K, V, S, MoveV, Strategy>>(
+       dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
+       capacity, bucket_max_size, dim, keys, scores, cur_score, n, values,
+       d_dst_values, founds, thread_all, global_epoch, GetBlockIdx(), max_bucket_shift,
+       capacity_divisor_magic, capacity_divisor_shift);
+ }
+
  }  // namespace hkv
  }  // namespace npu
  

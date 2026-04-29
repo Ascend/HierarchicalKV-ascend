@@ -583,7 +583,7 @@ void test_find_or_insert_with_types_and_dim() {
 
   // 5.2 下发算子
   table.find_or_insert(key_num, device_data.device_keys, device_data.device_values,
-                       nullptr, device_data.stream);
+                       nullptr, device_data.stream, is_unique);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   EXPECT_EQ(table.size(device_data.stream), key_num); // 大小不变
 
@@ -631,7 +631,7 @@ void test_find_or_insert_with_types_and_dim() {
   
   // 下发算子
   table.find_or_insert(mixed_key_num, mixed_device_data.device_keys, mixed_device_data.device_values,
-                       nullptr, mixed_device_data.stream);
+                       nullptr, mixed_device_data.stream, is_unique);
   ASSERT_EQ(aclrtSynchronizeStream(mixed_device_data.stream), ACL_ERROR_NONE);
   EXPECT_EQ(table.size(mixed_device_data.stream), key_num + 1024); // 增加1024个新键
 }
@@ -657,6 +657,26 @@ TEST(test_find_or_insert, data_types_uint64_uint8_uint64_dim8) {
   test_find_or_insert_with_types_and_dim<uint64_t, uint8_t, uint64_t, 8, true>();
 }
 
+TEST(test_find_or_insert, data_types_uint64_float_uint64_dim8_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 8, false>();
+}
+
+TEST(test_find_or_insert, data_types_int64_double_uint64_dim8_non_unique) {
+  test_find_or_insert_with_types_and_dim<int64_t, double, uint64_t, 8, false>();
+}
+
+TEST(test_find_or_insert, data_types_int64_float_uint64_dim8_non_unique) {
+  test_find_or_insert_with_types_and_dim<int64_t, float, uint64_t, 8, false>();
+}
+
+TEST(test_find_or_insert, data_types_uint64_uint16_uint64_dim8_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, uint16_t, uint64_t, 8, false>();
+}
+
+TEST(test_find_or_insert, data_types_uint64_uint8_uint64_dim8_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, uint8_t, uint64_t, 8, false>();
+}
+
 // 测试不同dim大小
 TEST(test_find_or_insert, dim_16_uint64_float_uint64) {
   test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 16, true>();
@@ -676,4 +696,83 @@ TEST(test_find_or_insert, dim_128_uint64_float_uint64) {
 
 TEST(test_find_or_insert, dim_256_uint64_float_uint64) {
   test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 256, true>();
+}
+
+TEST(test_find_or_insert, dim_16_uint64_float_uint64_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 16, false>();
+}
+
+TEST(test_find_or_insert, dim_32_uint64_float_uint64_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 32, false>();
+}
+
+TEST(test_find_or_insert, dim_64_uint64_float_uint64_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 64, false>();
+}
+
+TEST(test_find_or_insert, dim_128_uint64_float_uint64_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 128, false>();
+}
+
+TEST(test_find_or_insert, dim_256_uint64_float_uint64_non_unique) {
+  test_find_or_insert_with_types_and_dim<uint64_t, float, uint64_t, 256, false>();
+}
+
+TEST(test_find_or_insert, duplicate_keys) {
+  // 1. 初始化
+  init_env();
+
+  size_t free_mem = 0;
+  size_t total_mem = 0;
+  constexpr size_t hbm_for_values = 1UL << 30;
+  ASSERT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
+            ACL_ERROR_NONE);
+  ASSERT_GT(free_mem, hbm_for_values)
+      << "free HBM is not enough free:" << free_mem << "need:" << hbm_for_values;
+
+  constexpr size_t dim = 8;
+  constexpr size_t init_capacity = 128UL * 1024;
+  constexpr size_t key_num = 1UL * 1024;
+
+  using K = uint64_t;
+  using V = float;
+  using S = uint64_t;
+  size_t each_key_size = sizeof(K);
+  size_t each_value_size = sizeof(V);
+  size_t each_score_size = sizeof(S);
+
+  // 2. 建表
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = init_capacity,
+      .max_hbm_for_vectors = hbm_for_values,
+      .dim = dim,
+      .io_by_cpu = false,
+  };
+  using Table = HashTable<K, V>;
+
+  Table table;
+  table.init(options);
+  EXPECT_EQ(table.size(), 0);
+
+  // 3. 数据准备
+  // 3.1 host数据
+  vector<K> host_keys(key_num, 0);
+  vector<V> host_values(key_num * dim, 0);
+
+  // 3.2 申请hbm内存
+  DeviceData<K, V, S> device_data;
+  device_data.malloc(key_num, dim);
+
+  // 4. 插值，插入相同的值
+  // 4.1 生产连续值
+  ASSERT_EQ(aclrtMemset(device_data.device_keys, key_num * each_key_size, 1,
+                          key_num * each_key_size),
+              ACL_ERROR_NONE);
+
+  // 4.2 下发算子
+  table.find_or_insert(key_num, device_data.device_keys, device_data.device_values,
+                       nullptr, device_data.stream, false);
+  ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
+  EXPECT_EQ(table.size(device_data.stream), 1);
 }

@@ -658,3 +658,33 @@ TEST(test_find_or_insert_evict_strategies, kCustomized) {
   using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, true>("kCustomized");
 }
+
+// 测试 kLru 策略
+TEST(test_find_or_insert_non_unique_evict_strategies, kLru) {
+  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kLru>;
+  test_find_or_insert_with_strategy<Table, false>("kLru");
+}
+
+// 测试 kLfu 策略
+TEST(test_find_or_insert_non_unique_evict_strategies, kLfu) {
+  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kLfu>;
+  test_find_or_insert_with_strategy<Table, false>("kLfu");
+}
+
+// 测试 kEpochLru 策略
+TEST(test_find_or_insert_non_unique_evict_strategies, kEpochLru) {
+  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kEpochLru>;
+  test_find_or_insert_with_strategy<Table, false>("kEpochLru");
+}
+
+// 测试 kEpochLfu 策略
+TEST(test_find_or_insert_non_unique_evict_strategies, kEpochLfu) {
+  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kEpochLfu>;
+  test_find_or_insert_with_strategy<Table, false>("kEpochLfu");
+}
+
+// 测试 kCustomized 策略
+TEST(test_find_or_insert_non_unique_evict_strategies, kCustomized) {
+  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  test_find_or_insert_with_strategy<Table, false>("kCustomized");
+}
