@@ -633,6 +633,7 @@ void print_title_hybrid_a() {
        << "|    \u03BB "
        << "| insert_or_assign "
        << "|   find "
+       << "| find_or_insert "
        << "| assign "
        << "| assign_values "
        << "|\n";
@@ -643,6 +644,8 @@ void print_title_hybrid_a() {
        << "|-----------------:"
        //<< "|   find "
        << "|-------:"
+       //<< "| find_or_insert "
+       << "|---------------:"
        //<< "| assign "
        << "|-------:"
        //<< "| assign_values "
@@ -884,6 +887,7 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
       std::vector<API_Select> apis_a{
         API_Select::insert_or_assign,
         API_Select::find,
+        API_Select::find_or_insert,
         API_Select::assign,
         API_Select::assign_values,
       };

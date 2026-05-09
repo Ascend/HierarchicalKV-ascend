@@ -37,6 +37,7 @@ constexpr uint32_t THREAD_NUM_512 = 512;
 constexpr uint32_t THREAD_NUM_1024 = 1024;
 constexpr uint32_t THREAD_NUM_2048 = 2048;
 constexpr uint32_t BYTE_MASK = 0x01010101;
+constexpr int NET_WORKERS = 16;
 
 static inline size_t SAFE_GET_GRID_SIZE(size_t N, int block_size) {
   return ((N) > std::numeric_limits<size_t>::max())
@@ -170,6 +171,52 @@ void write_by_cpu(V** __restrict dst, const V* __restrict src, size_t dim,
   }
 
   for (int i = 0; i < n_worker_used; i++) {
+    thds[i].join();
+  }
+}
+
+template <class V>
+void read_or_write_by_cpu(V** __restrict table_value_addrs,
+                          V* __restrict param_values,
+                          const bool* founds,
+                          size_t dim, int N, int n_worker = NET_WORKERS) {
+  std::vector<std::thread> thds;
+  n_worker = std::max(n_worker, 1);
+
+  auto functor = [dim](V** __restrict table_value_addrs,
+                               V* __restrict param_values,
+                               const bool* founds,
+                               int handled_size,
+                               int trunk_size) -> void {
+    for (int i = handled_size; i < handled_size + trunk_size; ++i) {
+      if (table_value_addrs[i] != nullptr) {
+        if (founds[i]) {
+          memcpy(param_values + i * dim, table_value_addrs[i],
+                 sizeof(V) * dim);
+        } else {
+          memcpy(table_value_addrs[i], param_values + i * dim,
+                 sizeof(V) * dim);
+        }
+      }
+    }
+  };
+
+  int32_t trunk_size_floor = N / n_worker;
+  int32_t trunk_size_remain = N % n_worker;
+  int32_t n_worker_used = trunk_size_floor == 0 ? trunk_size_remain : n_worker;
+
+  size_t handled_size = 0;
+  for (int i = 0; i < n_worker_used; ++i) {
+    int32_t cur_trunk_size = trunk_size_floor;
+    if (trunk_size_remain != 0) {
+      cur_trunk_size++;
+      trunk_size_remain--;
+    }
+    thds.emplace_back(functor, table_value_addrs, param_values, founds, handled_size, cur_trunk_size);
+    handled_size += cur_trunk_size;
+  }
+
+  for (int i = 0; i < n_worker_used; ++i) {
     thds[i].join();
   }
 }
