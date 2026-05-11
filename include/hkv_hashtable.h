@@ -2916,10 +2916,6 @@ class HashTable : public HashTableBase<K, V, S> {
 
     while (capacity() < new_capacity &&
            capacity() * 2 <= options_.max_capacity) {
-      if (bucket_memory_pool_manager_ != nullptr &&
-          bucket_memory_pool_manager_->use_pool()) {
-        bucket_memory_pool_manager_->ensure_capacity(table_->buckets_num * 2);
-      }
       double_capacity(&table_, allocator_, block_dim_,
                       bucket_memory_pool_manager_ != nullptr
                           ? bucket_memory_pool_manager_.get()
@@ -3005,6 +3001,10 @@ class HashTable : public HashTableBase<K, V, S> {
       reach_max_capacity_ = false;
     }
     options_.max_capacity = new_max_capacity;
+    if (bucket_memory_pool_manager_ != nullptr &&
+      bucket_memory_pool_manager_->use_pool()) {
+        bucket_memory_pool_manager_->set_max_capacity(new_max_capacity);
+    }
   }
 
   /**

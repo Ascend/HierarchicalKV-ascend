@@ -17,8 +17,10 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <memory>
 #include <vector>
+#include <stdexcept>
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
 #include "test_device_data.h"
@@ -317,4 +319,147 @@ TEST(test_reserve, test_reserve_to_ddr_with_defragmentation) {
   size_t max_hbm_for_vectors = init_capacity * dim * sizeof(V);
   test_reserve_with_defragmentation(dim, key_num, init_capacity, max_capacity,
                                     max_hbm_for_vectors);
+}
+
+void test_dynamic_max_capacity_expand() {
+  constexpr size_t dim = 64;
+  constexpr size_t len = 10000;
+  size_t max_capacity = 1 << 14;
+  constexpr size_t init_capacity = 1 << 12;
+  constexpr size_t uplimit = 1 << 20;
+  constexpr float load_factor_threshold = 0.98f;
+
+  init_env();
+
+  HashTableOptions options{
+      .init_capacity = init_capacity,
+      .max_capacity = max_capacity,
+      .max_hbm_for_vectors = uplimit * dim * sizeof(V),
+      .dim = dim,
+  };
+  using Table = HashTable<K, V>;
+
+  Table table;
+  table.init(options);
+
+  std::map<K, std::vector<V>> ref_map;
+
+  DeviceData<K, V, S> insert_data;
+  insert_data.malloc(len, dim);
+  DeviceData<K, V, S> evict_data;
+  evict_data.malloc(len, dim);
+
+  size_t offset = 0;
+  size_t total_len = 0;
+
+  while (true) {
+    // Generate sequential keys starting from offset
+    std::vector<K> host_keys(len);
+    std::vector<V> host_values(len * dim);
+    for (size_t i = 0; i < len; ++i) {
+      host_keys[i] = offset + i;
+      for (size_t j = 0; j < dim; ++j) {
+        host_values[i * dim + j] = static_cast<V>(host_keys[i]);
+      }
+    }
+    insert_data.copy_keys(host_keys, len);
+    insert_data.copy_values(host_values, len, dim);
+
+    size_t n_evicted = table.insert_and_evict(
+        len, insert_data.device_keys, insert_data.device_values, nullptr,
+        evict_data.device_keys, evict_data.device_values, nullptr,
+        insert_data.stream);
+    offset += len;
+    total_len += len;
+
+    if (n_evicted > 0) {
+      std::vector<K> evicted_keys(n_evicted);
+      std::vector<V> evicted_values(n_evicted * dim);
+      ASSERT_EQ(aclrtMemcpy(evicted_keys.data(), n_evicted * sizeof(K),
+                            evict_data.device_keys, n_evicted * sizeof(K),
+                            ACL_MEMCPY_DEVICE_TO_HOST),
+                ACL_ERROR_NONE);
+      ASSERT_EQ(aclrtMemcpy(evicted_values.data(), n_evicted * dim * sizeof(V),
+                            evict_data.device_values, n_evicted * dim * sizeof(V),
+                            ACL_MEMCPY_DEVICE_TO_HOST),
+                ACL_ERROR_NONE);
+      for (size_t i = 0; i < n_evicted; ++i) {
+        std::vector<V> vec(dim);
+        for (size_t j = 0; j < dim; ++j) {
+          vec[j] = evicted_values[i * dim + j];
+        }
+        ref_map[evicted_keys[i]] = vec;
+      }
+    }
+
+    ASSERT_EQ(aclrtSynchronizeStream(insert_data.stream), ACL_ERROR_NONE);
+
+    if (table.load_factor(insert_data.stream) >= load_factor_threshold) {
+      ASSERT_GE(table.size(insert_data.stream),
+                static_cast<size_t>(static_cast<float>(max_capacity) *
+                                    load_factor_threshold));
+      max_capacity *= 2;
+      if (max_capacity > uplimit) {
+        break;
+      }
+      
+      table.set_max_capacity(max_capacity);
+      table.reserve(max_capacity, insert_data.stream);
+      ASSERT_EQ(max_capacity, table.capacity());
+      ASSERT_LE(table.load_factor(insert_data.stream), 0.5f);
+    }
+
+    if (total_len > uplimit * 2) {
+      throw std::runtime_error("Traverse too much keys but not finish test.");
+    }
+  }
+
+  // Export all keys and verify
+  DeviceData<K, V, S> export_data;
+  export_data.malloc(table.capacity(), dim);
+
+  for (size_t export_offset = 0; export_offset < table.capacity();
+       export_offset += len) {
+    size_t search_len = len;
+    if (export_offset + search_len > table.capacity()) {
+      search_len = table.capacity() - export_offset;
+    }
+    size_t n_exported = table.export_batch(
+        search_len, export_offset, export_data.device_keys,
+        export_data.device_values, nullptr, export_data.stream);
+    ASSERT_EQ(aclrtSynchronizeStream(export_data.stream), ACL_ERROR_NONE);
+
+    std::vector<K> exported_keys(n_exported);
+    std::vector<V> exported_values(n_exported * dim);
+    ASSERT_EQ(aclrtMemcpy(exported_keys.data(), n_exported * sizeof(K),
+                          export_data.device_keys, n_exported * sizeof(K),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+    ASSERT_EQ(aclrtMemcpy(exported_values.data(), n_exported * dim * sizeof(V),
+                          export_data.device_values, n_exported * dim * sizeof(V),
+                          ACL_MEMCPY_DEVICE_TO_HOST),
+              ACL_ERROR_NONE);
+
+    for (size_t i = 0; i < n_exported; ++i) {
+      std::vector<V> vec(dim);
+      for (size_t j = 0; j < dim; ++j) {
+        vec[j] = exported_values[i * dim + j];
+      }
+      ref_map[exported_keys[i]] = vec;
+    }
+  }
+
+  for (const auto& it : ref_map) {
+    for (size_t j = 0; j < dim; ++j) {
+      ASSERT_EQ(static_cast<V>(it.first), it.second[j]);
+    }
+  }
+
+  ASSERT_EQ(table.capacity() * 2, max_capacity);
+  ASSERT_GE(static_cast<float>(ref_map.size()),
+            static_cast<float>(table.capacity()) * load_factor_threshold);
+}
+
+TEST(test_reserve, test_dynamic_max_capacity_expand) {
+  test_dynamic_max_capacity_expand();
 }

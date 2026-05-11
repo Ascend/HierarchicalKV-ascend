@@ -48,11 +48,13 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
 
   BucketMemoryPoolManager() = default;
   ~BucketMemoryPoolManager() override {
-    if (use_bucket_memory_pool_ && bucket_memory_pool_ != nullptr) {
-      NPU_CHECK(aclrtFree(bucket_memory_pool_));
-      bucket_memory_pool_ = nullptr;
-      bucket_memory_pool_size_ = 0;
-      bucket_memory_size_ = 0;
+    if (use_bucket_memory_pool_ && !bucket_memory_pool_bases_.empty()) {
+      for (uint8_t* block : bucket_memory_pool_bases_) {
+        if (block != nullptr) {
+          NPU_CHECK(aclrtFree(block));
+        }
+      }
+      bucket_memory_pool_bases_.clear();
     }
     if (!use_bucket_memory_pool_ && allocator_ != nullptr) {
       for (uint8_t* block : block_bases_) {
@@ -69,11 +71,8 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
     options_ = options;
     parse_memory_pool_config();
     if (use_bucket_memory_pool_) {
-      allocate_bucket_memory_pool();
+      bucket_memory_size_ = calculate_bucket_memory_size();
     } else {
-      bucket_memory_pool_ = nullptr;
-      bucket_memory_pool_size_ = 0;
-      bucket_memory_size_ = 0;
       bucket_memory_size_non_pool_ = calculate_bucket_memory_size_non_pool();
     }
   }
@@ -81,37 +80,57 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
   void ensure_buckets_for_range(size_t start, size_t end,
                                 size_t num_of_buckets_per_alloc,
                                 BaseAllocator* allocator) override {
-    if (use_bucket_memory_pool_) {
-      return;  // no-op, pool already covers
-    }
-    if (allocator != nullptr) {
-      allocator_ = allocator;
-    }
-    if (num_of_buckets_per_alloc_ == 0) {
-      num_of_buckets_per_alloc_ = num_of_buckets_per_alloc;
-    }
     size_t bucket_memory_size = get_bucket_memory_size();
-    for (size_t i = start; i < end; i += num_of_buckets_per_alloc) {
-      size_t num_of_buckets =
-          std::min(end - i, static_cast<size_t>(num_of_buckets_per_alloc));
-      uint8_t* address = nullptr;
-      allocator->alloc(MemoryType::Device, (void**)&address,
-                       bucket_memory_size * num_of_buckets);
-      block_bases_.push_back(address);
+    if (use_bucket_memory_pool_) {
+      if (num_of_buckets_per_alloc_ == 0) {
+        num_of_buckets_per_alloc_ = end - start;
+      }
+      for (size_t i = start; i < end; i += num_of_buckets_per_alloc_) {
+        size_t num_of_buckets =
+            std::min(end - i, static_cast<size_t>(num_of_buckets_per_alloc_));
+        uint8_t* address = nullptr;
+        NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&address),
+                              bucket_memory_size * num_of_buckets,
+                              bucket_malloc_flag_));
+        bucket_memory_pool_bases_.push_back(address);
+      }
+    } else {
+      if (allocator != nullptr) {
+        allocator_ = allocator;
+      }
+      if (num_of_buckets_per_alloc_ == 0) {
+        num_of_buckets_per_alloc_ = num_of_buckets_per_alloc;
+      }
+      for (size_t i = start; i < end; i += num_of_buckets_per_alloc) {
+        size_t num_of_buckets =
+            std::min(end - i, static_cast<size_t>(num_of_buckets_per_alloc));
+        uint8_t* address = nullptr;
+        allocator->alloc(MemoryType::Device, reinterpret_cast<void**>(&address),
+                         bucket_memory_size * num_of_buckets);
+        block_bases_.push_back(address);
+      }
     }
   }
 
   uint8_t* get_bucket_address(size_t bucket_index) const override {
-    if (use_bucket_memory_pool_) {
-      return bucket_memory_pool_ + bucket_index * bucket_memory_size_;
-    }
-    if (block_bases_.empty() || num_of_buckets_per_alloc_ == 0) {
+    if (num_of_buckets_per_alloc_ == 0) {
       return nullptr;
     }
     size_t block_index = bucket_index / num_of_buckets_per_alloc_;
     size_t offset_in_block = bucket_index % num_of_buckets_per_alloc_;
-    return block_bases_[block_index] +
-           offset_in_block * bucket_memory_size_non_pool_;
+    size_t bucket_memory_size = get_bucket_memory_size();
+    if (use_bucket_memory_pool_) {
+      if (bucket_memory_pool_bases_.empty()) {
+        return nullptr;
+      }
+      return bucket_memory_pool_bases_[block_index] +
+             offset_in_block * bucket_memory_size;
+    } else {
+      if (block_bases_.empty()) {
+        return nullptr;
+      }
+      return block_bases_[block_index] + offset_in_block * bucket_memory_size;
+    }
   }
 
   size_t get_bucket_memory_size() const override {
@@ -121,22 +140,8 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
 
   bool use_pool() const override { return use_bucket_memory_pool_; }
 
-  void ensure_capacity(size_t new_buckets_num) {
-    if (!use_bucket_memory_pool_) {
-      return;
-    }
-    size_t required_size = bucket_memory_size_ * new_buckets_num;
-    if (bucket_memory_pool_ == nullptr || required_size <= bucket_memory_pool_size_) {
-      return;
-    }
-    size_t max_buckets_num = calculate_max_buckets_num();
-    size_t new_pool_size = bucket_memory_size_ * max_buckets_num;
-    uint8_t* new_bucket_memory_pool = nullptr;
-    NPU_CHECK(aclrtMalloc((void**)&new_bucket_memory_pool, new_pool_size,
-                          bucket_malloc_flag_));
-    NPU_CHECK(aclrtFree(bucket_memory_pool_));
-    bucket_memory_pool_ = new_bucket_memory_pool;
-    bucket_memory_pool_size_ = new_pool_size;
+  void set_max_capacity(size_t new_max_capacity) {
+    options_.max_capacity = new_max_capacity;
   }
 
  private:
@@ -234,46 +239,25 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
     size_t bucket_memory_size =
         options_.max_bucket_size * (sizeof(key_type) + sizeof(score_type));
     size_t reserve_size = options_.max_bucket_size < CACHE_LINE_SIZE
-                                ? CACHE_LINE_SIZE
-                                : options_.max_bucket_size;
+                              ? CACHE_LINE_SIZE
+                              : options_.max_bucket_size;
     bucket_memory_size += reserve_size * sizeof(uint8_t);
-    return (bucket_memory_size + BUCKET_ALIGN_SIZE - 1) / BUCKET_ALIGN_SIZE * BUCKET_ALIGN_SIZE;
+    return (bucket_memory_size + BUCKET_ALIGN_SIZE - 1) / BUCKET_ALIGN_SIZE *
+           BUCKET_ALIGN_SIZE;
   }
 
   size_t calculate_bucket_memory_size_non_pool() const {
     size_t bucket_memory_size =
         options_.max_bucket_size * (sizeof(key_type) + sizeof(score_type));
     size_t reserve_size = options_.max_bucket_size < CACHE_LINE_SIZE
-                                ? CACHE_LINE_SIZE
-                                : options_.max_bucket_size;
+                              ? CACHE_LINE_SIZE
+                              : options_.max_bucket_size;
     bucket_memory_size += reserve_size * sizeof(uint8_t);
     return bucket_memory_size;
   }
 
-  size_t calculate_max_buckets_num() const {
-    if ((options_.init_capacity * 2) > options_.max_capacity) {
-      return 1 + ((options_.max_capacity - 1) / options_.max_bucket_size);
-    }
-    size_t max_buckets_num = 1;
-    size_t temp_capacity = options_.max_bucket_size;
-    while (temp_capacity < options_.max_capacity) {
-      max_buckets_num *= 2;
-      temp_capacity = max_buckets_num * options_.max_bucket_size;
-    }
-    return max_buckets_num;
-  }
-
-  void allocate_bucket_memory_pool() {
-    bucket_memory_size_ = calculate_bucket_memory_size();
-    size_t max_buckets_num = calculate_max_buckets_num();
-    bucket_memory_pool_size_ = bucket_memory_size_ * max_buckets_num;
-    NPU_CHECK(aclrtMalloc((void**)&bucket_memory_pool_, bucket_memory_pool_size_,
-                          bucket_malloc_flag_));
-  }
-
   HashTableOptions options_;
-  uint8_t* bucket_memory_pool_ = nullptr;
-  size_t bucket_memory_pool_size_ = 0;
+  std::vector<uint8_t*> bucket_memory_pool_bases_;
   size_t bucket_memory_size_ = 0;
   bool use_bucket_memory_pool_ = false;
   aclrtMemMallocPolicy bucket_malloc_flag_ = ACL_MEM_MALLOC_HUGE_FIRST;
