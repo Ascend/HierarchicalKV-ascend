@@ -35,7 +35,7 @@
 | insert_or_assign   | 是       | -                                                               |
 | insert_and_evict   | 是       | -                                                               |
 | accum_or_assign    | 是       | 不支持double、uint16数据类型                                    |
-| find_or_insert     | 否       | -                                                               |
+| find_or_insert     | 是       | -                                                               |
 | find_or_insert*    | 是       | -                                                               |
 | lock_keys          | 是       | -                                                               |
 | unlock_keys        | 是       | -                                                               |
