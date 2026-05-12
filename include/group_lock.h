@@ -109,6 +109,7 @@ class group_shared_mutex {
    */
   void unlock_read(aclrtStream stream) {
     group_lock::unlock_read_kernel<int32_t><<<1, 0, stream>>>(d_read_count_);
+    NPU_CHECK(aclrtSynchronizeStream(stream));
     h_read_count_.fetch_sub(1, std::memory_order_release);
   }
 
@@ -147,6 +148,7 @@ class group_shared_mutex {
   void unlock_update(aclrtStream stream) {
     group_lock::unlock_update_kernel<int32_t>
         <<<1, 0, stream>>>(d_update_count_);
+    NPU_CHECK(aclrtSynchronizeStream(stream));
     h_update_count_.fetch_sub(1, std::memory_order_release);
   }
 
@@ -198,6 +200,7 @@ class group_shared_mutex {
   void unlock_update_read(aclrtStream stream) {
     group_lock::unlock_update_read_kernel<int32_t>
         <<<1, 0, stream>>>(d_update_count_, d_read_count_, d_unique_flag_);
+    NPU_CHECK(aclrtSynchronizeStream(stream));
     h_read_count_.fetch_sub(1, std::memory_order_release);
     h_update_count_.fetch_sub(1, std::memory_order_release);
     h_unique_flag_.store(false, std::memory_order_release);

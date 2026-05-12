@@ -33,4 +33,4 @@ add_executable(test_score_functor ${CMAKE_CURRENT_SOURCE_DIR}/test_score_functor
 target_link_libraries(test_score_functor PRIVATE hkv_depends test_depends)
 add_test(NAME test_score_functor COMMAND test_score_functor)
 
-# add_subdirectory(community)
+add_subdirectory(community)
