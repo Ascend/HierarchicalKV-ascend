@@ -16,21 +16,21 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <memory>
-#include <vector>
 #include <chrono>
+#include <memory>
 #include <thread>
+#include <vector>
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
-#include "test_util.h"
 #include "test_device_data.h"
+#include "test_util.h"
 
 using namespace std;
 using namespace npu::hkv;
 using namespace test_util;
 
 // 测试辅助函数：通用的 find_or_insert_ptr 测试逻辑
-template<typename Table>
+template <typename Table>
 void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   // 1. 初始化
   init_env();
@@ -41,7 +41,8 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
             ACL_ERROR_NONE);
   ASSERT_GT(free_mem, hbm_for_values)
-      << "free HBM is not enough free:" << free_mem << " need:" << hbm_for_values;
+      << "free HBM is not enough free:" << free_mem
+      << " need:" << hbm_for_values;
 
   constexpr size_t dim = 8;
   constexpr size_t init_capacity = 128UL * 1024;
@@ -68,7 +69,7 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
 
   // 2.1 对于 Epoch 相关策略，设置 global_epoch
   constexpr uint64_t test_epoch = 123;
-  if (table.evict_strategy == EvictStrategy::kEpochLru || 
+  if (table.evict_strategy == EvictStrategy::kEpochLru ||
       table.evict_strategy == EvictStrategy::kEpochLfu) {
     table.set_global_epoch(test_epoch);
   }
@@ -101,7 +102,7 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtCreateStream(&stream), ACL_ERROR_NONE);
 
   // 4. 第一次插入
-  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(), 
+  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(),
                                        host_values.data(), key_num);
   ASSERT_EQ(aclrtMemcpy(device_keys, key_num * each_key_size, host_keys.data(),
                         key_num * each_key_size, ACL_MEMCPY_HOST_TO_DEVICE),
@@ -109,12 +110,13 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
 
   // 对于 LFU 和 EpochLFU 策略，需要传递 scores
   S* scores_param = nullptr;
-  if (table.evict_strategy == EvictStrategy::kLfu || 
+  if (table.evict_strategy == EvictStrategy::kLfu ||
       table.evict_strategy == EvictStrategy::kEpochLfu ||
       table.evict_strategy == EvictStrategy::kCustomized) {
-    ASSERT_EQ(aclrtMemcpy(device_scores, key_num * sizeof(S), host_scores.data(),
-                          key_num * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE),
-              ACL_ERROR_NONE);
+    ASSERT_EQ(
+        aclrtMemcpy(device_scores, key_num * sizeof(S), host_scores.data(),
+                    key_num * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE),
+        ACL_ERROR_NONE);
     scores_param = device_scores;
   }
 
@@ -124,13 +126,14 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
   EXPECT_EQ(table.size(stream), key_num);
 
-  // 4.2.1 对于 LRU/EpochLRU 策略，读取第一次插入后的 scores（用于后续验证时钟递增）
+  // 4.2.1 对于 LRU/EpochLRU 策略，读取第一次插入后的
+  // scores（用于后续验证时钟递增）
   S* device_scores_first = nullptr;
   V** device_values_first = nullptr;
   bool* device_founds_first = nullptr;
   vector<S> host_scores_first;
-  
-  if (table.evict_strategy == EvictStrategy::kLru || 
+
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_scores_first),
                           key_num * sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST),
@@ -141,11 +144,11 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
     ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_founds_first),
                           key_num * sizeof(bool), ACL_MEM_MALLOC_HUGE_FIRST),
               ACL_ERROR_NONE);
-    
+
     table.find(key_num, device_keys, device_values_first, device_founds_first,
                device_scores_first, stream);
     ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
-    
+
     host_scores_first.resize(key_num, 0);
     ASSERT_EQ(aclrtMemcpy(host_scores_first.data(), key_num * sizeof(S),
                           device_scores_first, key_num * sizeof(S),
@@ -164,7 +167,7 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtMemcpy(host_found, key_num * sizeof(bool), device_found,
                         key_num * sizeof(bool), ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
-  
+
   vector<void*> expect_values_ptr(key_num, nullptr);
   ASSERT_EQ(aclrtMemcpy(expect_values_ptr.data(), key_num * sizeof(void*),
                         device_values_ptr, key_num * sizeof(void*),
@@ -198,13 +201,15 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   EXPECT_EQ(insert_num, key_num);
 
   // 5. 第二次查找，验证结果（会触发 LRU/EpochLRU 的时钟更新）
-  ASSERT_EQ(aclrtMemset(device_values_ptr, key_num * sizeof(V*), 0, 
-                        key_num * sizeof(V*)), ACL_ERROR_NONE);
-  ASSERT_EQ(aclrtMemset(device_found, key_num * sizeof(bool), 0, 
-                        key_num * sizeof(bool)), ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemset(device_values_ptr, key_num * sizeof(V*), 0,
+                        key_num * sizeof(V*)),
+            ACL_ERROR_NONE);
+  ASSERT_EQ(aclrtMemset(device_found, key_num * sizeof(bool), 0,
+                        key_num * sizeof(bool)),
+            ACL_ERROR_NONE);
 
   // 添加延迟确保时钟增加（对于LRU/EpochLRU）
-  if (table.evict_strategy == EvictStrategy::kLru || 
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -215,8 +220,8 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   EXPECT_EQ(table.size(stream), key_num);
 
   vector<void*> real_values_ptr(key_num, nullptr);
-  ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*), 
-                        device_values_ptr, key_num * sizeof(void*), 
+  ASSERT_EQ(aclrtMemcpy(real_values_ptr.data(), key_num * sizeof(void*),
+                        device_values_ptr, key_num * sizeof(void*),
                         ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
 
@@ -239,8 +244,8 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
       ASSERT_NE(real_values_ptr[i], nullptr);
       vector<V> expect_values(dim, i);
       vector<V> real_values(dim, 0);
-      ASSERT_EQ(aclrtMemcpy(real_values.data(), dim * each_value_size, 
-                            real_values_ptr[i], dim * each_value_size, 
+      ASSERT_EQ(aclrtMemcpy(real_values.data(), dim * each_value_size,
+                            real_values_ptr[i], dim * each_value_size,
                             ACL_MEMCPY_DEVICE_TO_HOST),
                 ACL_ERROR_NONE);
       EXPECT_EQ(real_values, expect_values);
@@ -255,7 +260,7 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   S* device_scores_output = nullptr;
   V** device_values_for_find = nullptr;
   bool* device_founds_for_find = nullptr;
-  
+
   ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_scores_output),
                         key_num * sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST),
             ACL_ERROR_NONE);
@@ -265,25 +270,25 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_founds_for_find),
                         key_num * sizeof(bool), ACL_MEM_MALLOC_HUGE_FIRST),
             ACL_ERROR_NONE);
-  
+
   // 使用 find 读取 scores
-  table.find(key_num, device_keys, device_values_for_find, device_founds_for_find,
-             device_scores_output, stream);
+  table.find(key_num, device_keys, device_values_for_find,
+             device_founds_for_find, device_scores_output, stream);
   ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
-  
+
   // 将 scores 拷贝回 host
   vector<S> host_scores_actual(key_num, 0);
   ASSERT_EQ(aclrtMemcpy(host_scores_actual.data(), key_num * sizeof(S),
                         device_scores_output, key_num * sizeof(S),
                         ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
-  
+
   // 验证 scores
   for (size_t i = 0; i < key_num; i++) {
     if (!host_found_again[i]) continue;
-    
+
     S actual_score = host_scores_actual[i];
-    
+
     switch (table.evict_strategy) {
       case EvictStrategy::kLru: {
         S first_score = host_scores_first[i];
@@ -291,13 +296,13 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
         EXPECT_GT(actual_score, first_score);
         break;
       }
-      
+
       case EvictStrategy::kLfu: {
         S expected_score = 2 * host_scores[i];
         EXPECT_EQ(actual_score, expected_score);
         break;
       }
-      
+
       case EvictStrategy::kEpochLru: {
         S first_score = host_scores_first[i];
         S first_cycle_part = first_score & 0xFFFFFFFF;
@@ -309,7 +314,7 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
         EXPECT_GT(cycle_part, first_cycle_part);
         break;
       }
-      
+
       case EvictStrategy::kEpochLfu: {
         S epoch_part = actual_score >> 32;
         S freq_part = actual_score & 0xFFFFFFFF;
@@ -319,18 +324,18 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
         EXPECT_EQ(freq_part, expected_freq);
         break;
       }
-      
+
       case EvictStrategy::kCustomized: {
         S expected_score = host_scores[i];
         EXPECT_EQ(actual_score, expected_score);
         break;
       }
-      
+
       default:
         FAIL();
     }
   }
-  
+
   // 验证策略参数正确传递
   switch (table.evict_strategy) {
     case EvictStrategy::kLru:
@@ -343,13 +348,13 @@ void test_find_or_insert_ptr_with_strategy(const char* strategy_name) {
       EXPECT_NE(scores_param, nullptr);
       break;
   }
-  
+
   ASSERT_EQ(aclrtFree(device_scores_output), ACL_ERROR_NONE);
   ASSERT_EQ(aclrtFree(device_values_for_find), ACL_ERROR_NONE);
   ASSERT_EQ(aclrtFree(device_founds_for_find), ACL_ERROR_NONE);
 
   // 释放第一次插入时的临时内存
-  if (table.evict_strategy == EvictStrategy::kLru || 
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     ASSERT_EQ(aclrtFree(device_scores_first), ACL_ERROR_NONE);
     ASSERT_EQ(aclrtFree(device_values_first), ACL_ERROR_NONE);
@@ -392,12 +397,14 @@ TEST(test_find_or_insert_ptr_evict_strategies, kEpochLfu) {
 
 // 测试 kCustomized 策略
 TEST(test_find_or_insert_ptr_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_ptr_with_strategy<Table>("kCustomized");
 }
 
 // 测试辅助函数：通用的 find_or_insert 测试逻辑
-template<typename Table, bool is_unique, bool use_ddr = false, bool io_by_cpu = false>
+template <typename Table, bool is_unique, bool use_ddr = false,
+          bool io_by_cpu = false>
 void test_find_or_insert_with_strategy(const char* strategy_name) {
   // 1. 初始化
   init_env();
@@ -408,7 +415,8 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
   ASSERT_EQ(aclrtGetMemInfo(ACL_HBM_MEM, &free_mem, &total_mem),
             ACL_ERROR_NONE);
   ASSERT_GT(free_mem, hbm_for_values)
-      << "free HBM is not enough free:" << free_mem << " need:" << hbm_for_values;
+      << "free HBM is not enough free:" << free_mem
+      << " need:" << hbm_for_values;
 
   constexpr size_t dim = 8;
   constexpr size_t init_capacity = 128UL * 1024;
@@ -440,7 +448,7 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
 
   // 2.1 对于 Epoch 相关策略，设置 global_epoch
   constexpr uint64_t test_epoch = 123;
-  if (table.evict_strategy == EvictStrategy::kEpochLru || 
+  if (table.evict_strategy == EvictStrategy::kEpochLru ||
       table.evict_strategy == EvictStrategy::kEpochLfu) {
     table.set_global_epoch(test_epoch);
   }
@@ -455,35 +463,38 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
   device_data.malloc(key_num, dim);
 
   // 4. 第一次插入
-  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(), 
+  create_continuous_keys<K, S, V, dim>(host_keys.data(), host_scores.data(),
                                        host_values.data(), key_num);
   device_data.copy_keys(host_keys, key_num);
-  device_data.copy_values(host_values, key_num , dim);
+  device_data.copy_values(host_values, key_num, dim);
   device_data.copy_scores(host_scores, key_num);
 
   // 对于 LFU 和 EpochLFU 策略，需要传递 scores
   S* scores_param = nullptr;
-  if (table.evict_strategy == EvictStrategy::kLfu || 
+  if (table.evict_strategy == EvictStrategy::kLfu ||
       table.evict_strategy == EvictStrategy::kEpochLfu ||
       table.evict_strategy == EvictStrategy::kCustomized) {
-    ASSERT_EQ(aclrtMemcpy(device_data.device_scores, key_num * sizeof(S), host_scores.data(),
-                          key_num * sizeof(S), ACL_MEMCPY_HOST_TO_DEVICE),
+    ASSERT_EQ(aclrtMemcpy(device_data.device_scores, key_num * sizeof(S),
+                          host_scores.data(), key_num * sizeof(S),
+                          ACL_MEMCPY_HOST_TO_DEVICE),
               ACL_ERROR_NONE);
     scores_param = device_data.device_scores;
   }
 
   // 4.2 下发算子（第一次插入）
-  table.find_or_insert(key_num, device_data.device_keys, device_data.device_values,
-                       scores_param, device_data.stream, is_unique);
+  table.find_or_insert(key_num, device_data.device_keys,
+                       device_data.device_values, scores_param,
+                       device_data.stream, is_unique);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   EXPECT_EQ(table.size(device_data.stream), key_num);
 
-  // 4.2.1 对于 LRU/EpochLRU 策略，读取第一次插入后的 scores（用于后续验证时钟递增）
+  // 4.2.1 对于 LRU/EpochLRU 策略，读取第一次插入后的
+  // scores（用于后续验证时钟递增）
   S* device_scores_first = nullptr;
   V* device_values_first = nullptr;
   vector<S> host_scores_first;
-  
-  if (table.evict_strategy == EvictStrategy::kLru || 
+
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_scores_first),
                           key_num * sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST),
@@ -491,10 +502,12 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
     ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_values_first),
                           key_num * dim * sizeof(V), ACL_MEM_MALLOC_HUGE_FIRST),
               ACL_ERROR_NONE);
-    
-    table.find(key_num, device_data.device_keys, device_values_first, device_data.device_found, device_scores_first, device_data.stream);
+
+    table.find(key_num, device_data.device_keys, device_values_first,
+               device_data.device_found, device_scores_first,
+               device_data.stream);
     ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
-    
+
     host_scores_first.resize(key_num, 0);
     ASSERT_EQ(aclrtMemcpy(host_scores_first.data(), key_num * sizeof(S),
                           device_scores_first, key_num * sizeof(S),
@@ -505,28 +518,29 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
   // 5. 第二次查找，验证结果（会触发 LRU/EpochLRU 的时钟更新）
   // 重新准备values内存用于存储查找结果
   V* device_values_second = nullptr;
-  ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_values_second),
-                        key_num * dim * each_value_size, ACL_MEM_MALLOC_HUGE_FIRST),
-            ACL_ERROR_NONE);
+  ASSERT_EQ(
+      aclrtMalloc(reinterpret_cast<void**>(&device_values_second),
+                  key_num * dim * each_value_size, ACL_MEM_MALLOC_HUGE_FIRST),
+      ACL_ERROR_NONE);
 
   // 添加延迟确保时钟增加（对于LRU/EpochLRU）
-  if (table.evict_strategy == EvictStrategy::kLru || 
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  table.find_or_insert(key_num, device_data.device_keys, device_values_second, scores_param, device_data.stream, is_unique);
+  table.find_or_insert(key_num, device_data.device_keys, device_values_second,
+                       scores_param, device_data.stream, is_unique);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   EXPECT_EQ(table.size(device_data.stream), key_num);
 
   // 5.1 验证值相同
   vector<V> host_founds(key_num * dim, 0);
-  ASSERT_EQ(
-      aclrtMemcpy(host_founds.data(), key_num * each_value_size * dim,
-                  device_values_second, key_num * each_value_size * dim,
-                  ACL_MEMCPY_DEVICE_TO_HOST),
-      ACL_ERROR_NONE);
-  
+  ASSERT_EQ(aclrtMemcpy(host_founds.data(), key_num * each_value_size * dim,
+                        device_values_second, key_num * each_value_size * dim,
+                        ACL_MEMCPY_DEVICE_TO_HOST),
+            ACL_ERROR_NONE);
+
   for (size_t i = 0; i < key_num; i++) {
     for (size_t j = 0; j < dim; j++) {
       size_t idx = i * dim + j;
@@ -537,29 +551,31 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
   // 6. 验证策略相关的 scores 是否正确更新
   S* device_scores_output = nullptr;
   V* device_values_for_find = nullptr;
-  
+
   ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_scores_output),
                         key_num * sizeof(S), ACL_MEM_MALLOC_HUGE_FIRST),
             ACL_ERROR_NONE);
   ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_values_for_find),
                         key_num * dim * sizeof(V), ACL_MEM_MALLOC_HUGE_FIRST),
             ACL_ERROR_NONE);
-  
+
   // 使用 find 读取 scores
-  table.find(key_num, device_data.device_keys, device_values_for_find, device_data.device_found, device_scores_output, device_data.stream);
+  table.find(key_num, device_data.device_keys, device_values_for_find,
+             device_data.device_found, device_scores_output,
+             device_data.stream);
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
-  
+
   // 将 scores 拷贝回 host
   vector<S> host_scores_actual(key_num, 0);
   ASSERT_EQ(aclrtMemcpy(host_scores_actual.data(), key_num * sizeof(S),
                         device_scores_output, key_num * sizeof(S),
                         ACL_MEMCPY_DEVICE_TO_HOST),
             ACL_ERROR_NONE);
-  
+
   // 验证 scores
   for (size_t i = 0; i < key_num; i++) {
     S actual_score = host_scores_actual[i];
-    
+
     switch (table.evict_strategy) {
       case EvictStrategy::kLru: {
         S first_score = host_scores_first[i];
@@ -567,13 +583,13 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
         EXPECT_GT(actual_score, first_score);
         break;
       }
-      
+
       case EvictStrategy::kLfu: {
         S expected_score = 2 * host_scores[i];
         EXPECT_EQ(actual_score, expected_score);
         break;
       }
-      
+
       case EvictStrategy::kEpochLru: {
         S first_score = host_scores_first[i];
         S first_cycle_part = first_score & 0xFFFFFFFF;
@@ -585,7 +601,7 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
         EXPECT_GT(cycle_part, first_cycle_part);
         break;
       }
-      
+
       case EvictStrategy::kEpochLfu: {
         S epoch_part = actual_score >> 32;
         S freq_part = actual_score & 0xFFFFFFFF;
@@ -595,18 +611,18 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
         EXPECT_EQ(freq_part, expected_freq);
         break;
       }
-      
+
       case EvictStrategy::kCustomized: {
         S expected_score = host_scores[i];
         EXPECT_EQ(actual_score, expected_score);
         break;
       }
-      
+
       default:
         FAIL();
     }
   }
-  
+
   // 验证策略参数正确传递
   switch (table.evict_strategy) {
     case EvictStrategy::kLru:
@@ -619,12 +635,12 @@ void test_find_or_insert_with_strategy(const char* strategy_name) {
       EXPECT_NE(scores_param, nullptr);
       break;
   }
-  
+
   ASSERT_EQ(aclrtFree(device_scores_output), ACL_ERROR_NONE);
   ASSERT_EQ(aclrtFree(device_values_for_find), ACL_ERROR_NONE);
 
   // 释放第一次插入时的临时内存
-  if (table.evict_strategy == EvictStrategy::kLru || 
+  if (table.evict_strategy == EvictStrategy::kLru ||
       table.evict_strategy == EvictStrategy::kEpochLru) {
     ASSERT_EQ(aclrtFree(device_scores_first), ACL_ERROR_NONE);
     ASSERT_EQ(aclrtFree(device_values_first), ACL_ERROR_NONE);
@@ -660,7 +676,8 @@ TEST(test_find_or_insert_evict_strategies, kEpochLfu) {
 
 // 测试 kCustomized 策略
 TEST(test_find_or_insert_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, true>("kCustomized");
 }
 
@@ -690,7 +707,8 @@ TEST(test_find_or_insert_non_unique_evict_strategies, kEpochLfu) {
 
 // 测试 kCustomized 策略
 TEST(test_find_or_insert_non_unique_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, false>("kCustomized");
 }
 
@@ -720,7 +738,8 @@ TEST(test_find_or_insert_ddr_evict_strategies, kEpochLfu) {
 
 // 测试 kCustomized 策略
 TEST(test_find_or_insert_ddr_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, true, true, false>("kCustomized");
 }
 
@@ -750,7 +769,8 @@ TEST(test_find_or_insert_ddr_non_unique_evict_strategies, kEpochLfu) {
 
 // 测试 kCustomized 策略
 TEST(test_find_or_insert_ddr_non_unique_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, false, true, false>("kCustomized");
 }
 
@@ -779,7 +799,9 @@ TEST(test_find_or_insert_ddr_non_unique_io_by_cpu_evict_strategies, kEpochLfu) {
 }
 
 // 测试 kCustomized 策略
-TEST(test_find_or_insert_ddr_non_unique_io_by_cpu_evict_strategies, kCustomized) {
-  using Table = HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
+TEST(test_find_or_insert_ddr_non_unique_io_by_cpu_evict_strategies,
+     kCustomized) {
+  using Table =
+      HashTable<uint64_t, float, uint64_t, EvictStrategy::kCustomized>;
   test_find_or_insert_with_strategy<Table, false, true, true>("kCustomized");
 }

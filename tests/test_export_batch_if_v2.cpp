@@ -19,11 +19,10 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
-#include "test_util.h"
 #include "test_device_data.h"
+#include "test_util.h"
 #include "types.h"
 
 using namespace std;
@@ -34,19 +33,19 @@ enum class FunctorVersion { V1, V2, V3, V4 };
 
 // 通用测试配置结构体
 struct ExportTestConfig {
-  size_t key_num;         // 键数量
-  bool test_empty_table;  // 是否测试空表
-  size_t offset;          // 导出偏移量
-  bool use_scores;        // 是否使用分数
+  size_t key_num;                  // 键数量
+  bool test_empty_table;           // 是否测试空表
+  size_t offset;                   // 导出偏移量
+  bool use_scores;                 // 是否使用分数
   FunctorVersion functor_version;  // 导出函数版本
-  bool use_fast_mode;     // 是否使用纯hbm模式
+  bool use_fast_mode;              // 是否使用纯hbm模式
 };
 
 template <class K, class S>
 struct ExportIfPredFunctor {
   __forceinline__ __simt_callee__ bool operator()(const K& key, const S& score,
-                                             const K& pattern,
-                                             const S& threshold) {
+                                                  const K& pattern,
+                                                  const S& threshold) {
     return score >= threshold;
   }
 };
@@ -58,8 +57,9 @@ struct ExportIfPredFunctorV2 {
   ExportIfPredFunctorV2(K pattern, S threshold)
       : pattern(pattern), threshold(threshold) {}
   template <int GroupSize>
-  __forceinline__ __simt_callee__ bool operator()(
-      const K& key, const __gm__ V* value, const S& score) {
+  __forceinline__ __simt_callee__ bool operator()(const K& key,
+                                                  const __gm__ V* value,
+                                                  const S& score) {
     /* evaluate key, score and value. */
     return ((!IS_RESERVED_KEY<K>(key)) && (score < threshold));
   }
@@ -118,7 +118,8 @@ void run_export_batch_if_v2_test(const ExportTestConfig& config) {
     device_data.copy_values(host_values, config.key_num, DIM);
 
     // 插入数据
-    table.insert_or_assign(config.key_num, device_data.device_keys, device_data.device_values, nullptr,
+    table.insert_or_assign(config.key_num, device_data.device_keys,
+                           device_data.device_values, nullptr,
                            device_data.stream);
     ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   }
@@ -158,25 +159,24 @@ void run_export_batch_if_v2_test(const ExportTestConfig& config) {
   ASSERT_EQ(aclrtMalloc(reinterpret_cast<void**>(&device_export_count),
                         sizeof(size_t), ACL_MEM_MALLOC_HUGE_FIRST),
             ACL_ERROR_NONE);
-  ASSERT_EQ(
-      aclrtMemset(device_export_count, sizeof(size_t), 0, sizeof(size_t)),
-      ACL_ERROR_NONE);
-  
+  ASSERT_EQ(aclrtMemset(device_export_count, sizeof(size_t), 0, sizeof(size_t)),
+            ACL_ERROR_NONE);
+
   K pattern = 0;
   S threshold = 40;
   if (config.functor_version == FunctorVersion::V2) {
     ExportIfPredFunctorV2<K, V, S> pred(pattern, threshold);
     table.template export_batch_if_v2<ExportIfPredFunctorV2<K, V, S>>(
-        pred, scan_len, config.offset, device_export_count,
-        device_export_keys, device_export_values,
+        pred, scan_len, config.offset, device_export_count, device_export_keys,
+        device_export_values,
         config.use_scores ? device_export_scores : nullptr, device_data.stream);
   } else if (config.functor_version == FunctorVersion::V1) {
     table.template export_batch_if<ExportIfPredFunctor>(
         pattern, threshold, scan_len, config.offset, device_export_count,
         device_export_keys, device_export_values,
         config.use_scores ? device_export_scores : nullptr, device_data.stream);
-    }
-  
+  }
+
   ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
   ASSERT_EQ(aclrtMemcpy(&export_count, sizeof(size_t), device_export_count,
                         sizeof(size_t), ACL_MEMCPY_DEVICE_TO_HOST),
@@ -184,7 +184,7 @@ void run_export_batch_if_v2_test(const ExportTestConfig& config) {
 
   ASSERT_EQ(aclrtFree(device_export_count), ACL_ERROR_NONE);
 
- if (config.test_empty_table) {
+  if (config.test_empty_table) {
     ASSERT_EQ(export_count, table.size(device_data.stream));
   } else {
     ASSERT_LE(export_count, table.size(device_data.stream));
@@ -250,7 +250,8 @@ TEST(test_export_batch_if_v2, test_export_batch_if_v2_empty) {
 TEST(test_export_batch_if_v2, test_export_batch_if_v2_offset) {
   // 测试不同偏移量下的导出功能
   // 注意：当offset > 0时，不能保证导出数量等于key_num
-  ExportTestConfig config = {1024, false, 1000, false, FunctorVersion::V2, true};
+  ExportTestConfig config = {1024, false, 1000, false, FunctorVersion::V2,
+                             true};
   RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   config.offset = 5000;
   RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
@@ -263,7 +264,8 @@ TEST(test_export_batch_if_v2, test_export_batch_if_v2_hybrid_basic) {
 }
 
 TEST(test_export_batch_if_v2, test_export_batch_if_v2_hybrid_full_key_num) {
-  ExportTestConfig config = {128 * 1024, false, 0, false, FunctorVersion::V2, false};
+  ExportTestConfig config = {128 * 1024,         false, 0, false,
+                             FunctorVersion::V2, false};
   RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
 }
@@ -275,7 +277,8 @@ TEST(test_export_batch_if, test_export_batch_if_basic) {
 }
 
 TEST(test_export_batch_if, test_export_batch_if_full_key_num) {
-  ExportTestConfig config = {128 * 1024, false, 0, false, FunctorVersion::V1, true};
+  ExportTestConfig config = {128 * 1024,         false, 0, false,
+                             FunctorVersion::V1, true};
   RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
 }
@@ -287,7 +290,8 @@ TEST(test_export_batch_if, test_export_batch_if_hybrid_basic) {
 }
 
 TEST(test_export_batch_if, test_export_batch_if_hybrid_full_key_num) {
-  ExportTestConfig config = {128 * 1024, false, 0, false, FunctorVersion::V1, false};
+  ExportTestConfig config = {128 * 1024,         false, 0, false,
+                             FunctorVersion::V1, false};
   RUN_EXPORT_BATCH_IF_V2_TEST(uint64_t, float, uint64_t, 8, config);
   RUN_EXPORT_BATCH_IF_V2_TEST(int64_t, double, uint64_t, 16, config);
 }

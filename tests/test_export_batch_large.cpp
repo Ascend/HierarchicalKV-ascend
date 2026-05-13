@@ -19,7 +19,6 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
 #include "test_util.h"
@@ -72,7 +71,8 @@ void run_large_scale_export_test(const ExportTestConfig& config) {
     vector<V> host_values(config.key_num * DIM);
     K start_key = 1;
     create_continuous_keys<K, S, V, DIM>(host_keys.data(), nullptr,
-                                         host_values.data(), config.key_num, start_key);
+                                         host_values.data(), config.key_num,
+                                         start_key);
 
     ASSERT_EQ(
         aclrtMalloc(reinterpret_cast<void**>(&device_keys),
@@ -95,11 +95,11 @@ void run_large_scale_export_test(const ExportTestConfig& config) {
     // 少量多次插入数据
     aclrtStream stream = nullptr;
     ASSERT_EQ(aclrtCreateStream(&stream), ACL_ERROR_NONE);
-    const size_t batch_size = 1024; // 每批插入128k个
+    const size_t batch_size = 1024;  // 每批插入128k个
     for (size_t i = 0; i < config.key_num; i += batch_size) {
       size_t current_batch_size = std::min(batch_size, config.key_num - i);
-      table.insert_or_assign(current_batch_size, device_keys + i, device_values + i * DIM, nullptr,
-                           stream);
+      table.insert_or_assign(current_batch_size, device_keys + i,
+                             device_values + i * DIM, nullptr, stream);
     }
     ASSERT_EQ(aclrtSynchronizeStream(stream), ACL_ERROR_NONE);
     ASSERT_EQ(aclrtDestroyStream(stream), ACL_ERROR_NONE);
@@ -150,7 +150,7 @@ void run_large_scale_export_test(const ExportTestConfig& config) {
               ACL_ERROR_NONE);
     ASSERT_EQ(
         aclrtMemset(device_export_count, sizeof(size_t), 0, sizeof(size_t)),
-              ACL_ERROR_NONE);
+        ACL_ERROR_NONE);
 
     table.export_batch(scan_len, config.offset, device_export_count,
                        device_export_keys, device_export_values,
@@ -221,7 +221,6 @@ void run_large_scale_export_test(const ExportTestConfig& config) {
 #define RUN_LARGE_SCALE_EXPORT_TEST(K, V, S, DIM, config) \
   run_large_scale_export_test<K, V, S, DIM>(config)
 
-  
 // 大数据量测试用例 - 使用key/value比值验证
 TEST(test_export_batch, test_large_scale_export_basic) {
   // 测试100K数据量的导出

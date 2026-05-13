@@ -19,11 +19,10 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
 #include "acl/acl.h"
 #include "hkv_hashtable.h"
-#include "test_util.h"
 #include "test_device_data.h"
+#include "test_util.h"
 
 using namespace std;
 using namespace npu::hkv;
@@ -314,7 +313,8 @@ void run_export_hybrid_test(const ExportTestConfig& config) {
     device_data.copy_values(host_values, config.key_num, DIM);
 
     // 插入数据
-    table.insert_or_assign(config.key_num, device_data.device_keys, device_data.device_values, nullptr,
+    table.insert_or_assign(config.key_num, device_data.device_keys,
+                           device_data.device_values, nullptr,
                            device_data.stream);
     ASSERT_EQ(aclrtSynchronizeStream(device_data.stream), ACL_ERROR_NONE);
     EXPECT_LE(table.size(), config.key_num);
@@ -474,4 +474,3 @@ TEST(test_export_batch, test_export_hybrid_large) {
   ExportTestConfig config = {128 * 1024, false, false, 0, false};
   RUN_EXPORT_HYBRID_TEST(uint64_t, float, uint64_t, 8, config);
 }
-
