@@ -1561,7 +1561,7 @@ class HashTable : public HashTableBase<K, V, S> {
                 table_->capacity_divisor_magic, table_->capacity_divisor_shift);
       }
     } else {
-      size_t size_all = n * sizeof(value_type*)+ n * sizeof(bool);
+      size_t size_all = n * sizeof(value_type*) + n * sizeof(bool);
       auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
       auto temp_storage{dev_ws.get<uint8_t*>(0)};
       value_type** table_value_addrs{
@@ -1573,15 +1573,14 @@ class HashTable : public HashTableBase<K, V, S> {
         size_t keys_size = n * sizeof(key_type*);
         auto dev_keys_ws{dev_mem_pool_->get_workspace<1>(keys_size, stream)};
         auto temp_keys_storage{dev_keys_ws.get<uint8_t*>(0)};
-        key_type** d_dst_keys{
-            reinterpret_cast<key_type**>(temp_keys_storage)};
+        key_type** d_dst_keys{reinterpret_cast<key_type**>(temp_keys_storage)};
         find_or_insert_hybrid_kernel<K, V, S, evict_strategy>
             <<<block_dim_, 0, stream>>>(
                 table_->buckets, table_->buckets_size, options_.max_bucket_size,
-                options_.dim, keys, values, scores, table_value_addrs, d_dst_keys, d_founds,
-                n, global_epoch_, table_->max_bucket_shift,
-                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-                table_->capacity);
+                options_.dim, keys, values, scores, table_value_addrs,
+                d_dst_keys, d_founds, n, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift, table_->capacity);
 
         auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
                                          sizeof(value_type), false);
@@ -1697,13 +1696,14 @@ class HashTable : public HashTableBase<K, V, S> {
         throw std::invalid_argument(
             "unique_key should be true and max_bucket_size should be larger.");
       }
-      find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(table_->buckets,
-        table_->buckets_size,
-        table_->buckets_num, options_.max_bucket_size, value_move_opt_.dim,
-        keys, static_cast<void*>(values), scores, locked_key_ptrs, n, founds, global_epoch_,
-        value_move_opt_.size, table_->max_bucket_shift,
-        table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-        n_align_warp, table_->capacity);
+      find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->buckets_size, table_->buckets_num,
+              options_.max_bucket_size, value_move_opt_.dim, keys,
+              static_cast<void*>(values), scores, locked_key_ptrs, n, founds,
+              global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
+              table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+              n_align_warp, table_->capacity);
 
       NpuCheckError();
       return;
@@ -1713,18 +1713,20 @@ class HashTable : public HashTableBase<K, V, S> {
       const size_type dev_ws_size{n * sizeof(key_type*)};
       auto dev_ws{dev_mem_pool_->get_workspace<1>(dev_ws_size, stream)};
       auto keys_ptr{dev_ws.get<key_type**>(0)};
-      NPU_CHECK(aclrtMemsetAsync(keys_ptr, dev_ws_size, 0, dev_ws_size, stream));
+      NPU_CHECK(
+          aclrtMemsetAsync(keys_ptr, dev_ws_size, 0, dev_ws_size, stream));
 
-      find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(table_->buckets,
-        table_->buckets_size,
-        table_->buckets_num, options_.max_bucket_size, value_move_opt_.dim,
-        keys, static_cast<void*>(values), scores, keys_ptr, n, founds, global_epoch_,
-        value_move_opt_.size, table_->max_bucket_shift,
-        table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-        n_align_warp, table_->capacity);
+      find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->buckets_size, table_->buckets_num,
+              options_.max_bucket_size, value_move_opt_.dim, keys,
+              static_cast<void*>(values), scores, keys_ptr, n, founds,
+              global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
+              table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+              n_align_warp, table_->capacity);
 
-      find_or_insert_ptr_kernel_unlock_key_v2<K><<<block_dim_, 0, stream>>>(
-              keys, keys_ptr, n);
+      find_or_insert_ptr_kernel_unlock_key_v2<K>
+          <<<block_dim_, 0, stream>>>(keys, keys_ptr, n);
     } else {
       find_or_insert_ptr_kernel_v2<K, V, S, evict_strategy>
           <<<block_dim_, 0, stream>>>(
