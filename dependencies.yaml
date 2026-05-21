@@ -1,0 +1,30 @@
+---
+package:
+  name: "HierarchicalKV-ascend"
+  version: "26.1.0"
+  description: "HierarchicalKV-ascend是一个基于昇腾平台, 面向推荐系统的高性能key-value存储加速库"
+
+ascend_stack:
+  - name: "hdk"
+    version: ">=26.0.rc2"
+    purpose: "运行HierarchicalKV-ascend的Ascend硬件开发套件最低版本"
+
+  - name: "cann"
+    version: ">=9.1.0"
+    purpose: "CANN(Compute Architecture for Neural Networks)是华为针对AI场景推出的异构计算架构,构建和运行HierarchicalKV-ascend的CANN最低版本"
+
+common:
+  - name: "gcc"
+    version: ">=8.1.0"
+    purpose: "编译HierarchicalKV-ascend的gcc编译器最低版本"
+
+  - name: "g++"
+    version: ">=8.1.0"
+    purpose: "编译HierarchicalKV-ascend的g++编译器最低版本"
+
+  - name: "cmake"
+    version: ">=3.16.0"
+    purpose: "构建HierarchicalKV-ascend的cmake最低版本"
+
+supported_npu:
+  - "ascend950"
