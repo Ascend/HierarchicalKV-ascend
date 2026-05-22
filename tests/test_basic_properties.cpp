@@ -15,6 +15,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -50,11 +51,15 @@ class HashTableTestHelper {
   template <int Strategy = EvictStrategy::kLru>
   std::unique_ptr<HashTable<K, V, S, Strategy>> create_table(
       size_type init_capacity, size_type max_capacity,
-      size_type max_bucket_size = 128) {
+      size_type max_bucket_size = 128,
+      size_type max_hbm_for_vectors = std::numeric_limits<size_type>::max()) {
     HashTableOptions options;
     options.init_capacity = init_capacity;
     options.max_capacity = max_capacity;
-    options.max_hbm_for_vectors = max_capacity * dim_ * sizeof(V);
+    options.max_hbm_for_vectors =
+        (max_hbm_for_vectors == std::numeric_limits<size_type>::max())
+            ? max_capacity * dim_ * sizeof(V)
+            : max_hbm_for_vectors;
     options.max_bucket_size = max_bucket_size;
     options.dim = dim_;
 
@@ -603,4 +608,53 @@ TEST(BasicPropertiesTest, CapacityBoundary) {
   size_t capacity_after_4 = table->capacity();
   EXPECT_EQ(capacity_after_4, capacity_after_3)
       << "Capacity should not grow beyond max_capacity";
+}
+
+TEST(BasicPropertiesTest, PureHbmModeQuery) {
+  const size_t MAX_BUCKET_SIZE = 128;
+  const size_t INIT_CAPACITY = 4096;
+  const size_t MAX_CAPACITY = 16384;
+  const size_t INIT_VECTOR_BYTES = INIT_CAPACITY * DIM * sizeof(V);
+  const size_t TWO_MB = 2UL * 1024UL * 1024UL;
+
+  HashTableTestHelper<K, V, S> helper(DIM, 1000);
+
+  {
+    auto table = helper.create_table<EvictStrategy::kLru>(
+        INIT_CAPACITY, INIT_CAPACITY, MAX_BUCKET_SIZE, INIT_VECTOR_BYTES);
+    HashTableBase<K, V, S>* base = table.get();
+    EXPECT_TRUE(base->is_pure_hbm_mode())
+        << "Table should report pure HBM when all value storage is in HBM";
+  }
+
+  {
+    auto table = helper.create_table<EvictStrategy::kLru>(
+        INIT_CAPACITY * 4, INIT_CAPACITY * 4, MAX_BUCKET_SIZE, TWO_MB); // 4 * INIT_CAPACITY = MAX_CAPACITY
+    HashTableBase<K, V, S>* base = table.get();
+    EXPECT_FALSE(base->is_pure_hbm_mode())
+        << "Table should report non-pure HBM when value storage is mixed HBM "
+           "and DDR";
+  }
+
+  {
+    auto table = helper.create_table<EvictStrategy::kLru>(
+        INIT_CAPACITY, INIT_CAPACITY, MAX_BUCKET_SIZE, 0);
+    HashTableBase<K, V, S>* base = table.get();
+    EXPECT_FALSE(base->is_pure_hbm_mode())
+        << "Table should report non-pure HBM when all value storage is DDR";
+  }
+
+  {
+    auto table = helper.create_table<EvictStrategy::kLru>(
+        INIT_CAPACITY, MAX_CAPACITY, MAX_BUCKET_SIZE, INIT_VECTOR_BYTES);
+    HashTableBase<K, V, S>* base = table.get();
+    EXPECT_TRUE(base->is_pure_hbm_mode())
+        << "Table should start in pure HBM mode before expansion";
+
+    table->reserve(INIT_CAPACITY * 2, helper.get_stream());
+    NPU_CHECK(aclrtSynchronizeStream(helper.get_stream()));
+    EXPECT_FALSE(base->is_pure_hbm_mode())
+        << "Table should report non-pure HBM after expansion allocates new "
+           "value storage in DDR";
+  }
 }

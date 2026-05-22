@@ -68,3 +68,4 @@
 | save               | 是       | -                                                               |
 | load               | 是       | -                                                               |
 | set_global_epoch   | 是       | -                                                               |
+| is_pure_hbm_mode   | 是       | Ascend独立支持。返回当前value是否全部存储在HBM中；结果会根据实际存储状态变化，reserve、insert_or_assign、find_or_insert、load等可能触发扩容的接口执行后建议重新调用 |

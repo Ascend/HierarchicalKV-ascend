@@ -833,6 +833,14 @@ class HashTableBase {
   virtual size_type bucket_count() const noexcept = 0;
 
   /**
+   * @brief Indicates whether all value storage currently resides in HBM.
+   *
+   * @return `true` if values are currently stored only in HBM and `false` if
+   * any value storage resides in host DDR.
+   */
+  virtual bool is_pure_hbm_mode() const noexcept = 0;
+
+  /**
    * @brief Save keys, vectors, scores in table to file or files.
    *
    * @param file A BaseKVFile object defined the file format on host filesystem.
@@ -3038,6 +3046,14 @@ class HashTable : public HashTableBase<K, V, S> {
    * @return The number of buckets in the table.
    */
   size_type bucket_count() const noexcept { return table_->buckets_num; }
+
+  /**
+   * @brief Indicates whether all value storage currently resides in HBM.
+   *
+   * @return `true` if values are currently stored only in HBM and `false` if
+   * any value storage resides in host DDR.
+   */
+  bool is_pure_hbm_mode() const noexcept { return is_fast_mode(); }
 
   /**
    * @brief Save keys, vectors, scores in table to file or files.
