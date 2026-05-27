@@ -60,7 +60,7 @@ static uint64_t GetMixedOpUbSize() {
   return valid_ub_size;
 }
 
-static inline ValueMoveTiling GetValueMoveTiling(uint32_t n, uint32_t block_dim,
+static inline ValueMoveTiling GetValueMoveTiling(uint64_t n, uint32_t block_dim,
                                                  uint32_t dim,
                                                  uint32_t element_size,
                                                  bool is_pure_simd, uint32_t buffer_num = DOUBLE_BUFFER) {

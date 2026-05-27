@@ -47,7 +47,6 @@
 #include "kernels/contains_kernel/contains_kernel.h"
 #include "kernels/assign_scores_kernel/assign_scores_kernel_with_filter.h"
 #include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
-#include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel.h"
 #include "kernels/find_or_insert_kernel/find_or_insert_kernel.h"
 #include "kernels/insert_or_assign_kernel/insert_or_assign_kernel.h"
 #include "tiling_helper.h"
@@ -1707,11 +1706,10 @@ class HashTable : public HashTableBase<K, V, S> {
       find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy>
           <<<block_dim_, 0, stream>>>(
               table_->buckets, table_->buckets_size, table_->buckets_num,
-              options_.max_bucket_size, value_move_opt_.dim, keys,
-              static_cast<void*>(values), scores, locked_key_ptrs, n, founds,
-              global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
-              table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-              n_align_warp, table_->capacity);
+              options_.max_bucket_size, options_.dim, keys, values, scores,
+              locked_key_ptrs, n, founds, global_epoch_,
+              table_->max_bucket_shift, table_->capacity_divisor_magic,
+              table_->capacity_divisor_shift, n_align_warp, table_->capacity);
 
       NpuCheckError();
       return;
@@ -1721,15 +1719,12 @@ class HashTable : public HashTableBase<K, V, S> {
       const size_type dev_ws_size{n * sizeof(key_type*)};
       auto dev_ws{dev_mem_pool_->get_workspace<1>(dev_ws_size, stream)};
       auto keys_ptr{dev_ws.get<key_type**>(0)};
-      NPU_CHECK(
-          aclrtMemsetAsync(keys_ptr, dev_ws_size, 0, dev_ws_size, stream));
 
       find_or_insert_ptr_kernel_lock_key_v2<K, V, S, evict_strategy>
           <<<block_dim_, 0, stream>>>(
               table_->buckets, table_->buckets_size, table_->buckets_num,
-              options_.max_bucket_size, value_move_opt_.dim, keys,
-              static_cast<void*>(values), scores, keys_ptr, n, founds,
-              global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
+              options_.max_bucket_size, options_.dim, keys, values, scores,
+              keys_ptr, n, founds, global_epoch_, table_->max_bucket_shift,
               table_->capacity_divisor_magic, table_->capacity_divisor_shift,
               n_align_warp, table_->capacity);
 

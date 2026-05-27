@@ -37,55 +37,32 @@ namespace hkv {
 using namespace AscendC;
 
 template <typename K = uint64_t, typename V = float, typename S = uint64_t,
-          typename VecV = int32_t, int Strategy = -1,
-          int32_t EVICT_GROUP_SIZE = 16>
+          int Strategy = -1, int32_t EVICT_GROUP_SIZE = 16>
 __simt_vf__ __aicore__
 LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_lock_key_vf_v2(
-    __gm__ Bucket<K, V, S>* buckets_gm, __gm__ int32_t* buckets_size_gm,
-    uint64_t buckets_num, uint32_t bucket_max_size, uint32_t dim,
-    __gm__ const K* keys_gm, __gm__ void* value_ptrs_gm, __gm__ S* scores_gm,
-    __gm__ K* __gm__* key_ptrs_gm, uint64_t n, __gm__ bool* founds_gm,
-    uint64_t global_epoch, uint64_t cur_score, uint32_t blockIdx,
-    uint64_t thread_all, uint32_t max_bucket_shift,
+    __gm__ Bucket<K, V, S>* __restrict__ buckets,
+    __gm__ int32_t* __restrict__ buckets_size, uint64_t buckets_num,
+    uint32_t bucket_max_size, uint32_t dim, __gm__ const K* __restrict__ keys,
+    __gm__ V * __gm__ * __restrict__ value_ptrs, __gm__ S* __restrict__ scores,
+    __gm__ K * __gm__ * __restrict__ key_ptrs, uint64_t n,
+    __gm__ bool* __restrict__ founds, uint64_t global_epoch, uint64_t cur_score,
+    uint32_t blockIdx, uint64_t thread_all, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
     uint64_t n_align_warp, uint64_t capacity) {
-  if (!buckets_gm) {
-    return;
-  }
-  if (!buckets_size_gm) {
-    return;
-  }
-  if (!keys_gm) {
-    return;
-  }
-  if (!value_ptrs_gm) {
-    return;
-  }
-  if (!founds_gm) {
+  if ((buckets == nullptr) || (buckets_size == nullptr) || (keys == nullptr) ||
+      (value_ptrs == nullptr) || (founds == nullptr)) {
     return;
   }
   using BUCKET = Bucket<K, V, S>;
   using ScoreFunctor = ScoreFunctor<K, V, S, Strategy>;
 
-  __gm__ Bucket<K, V, S>* __restrict__ buckets =
-      reinterpret_cast<__gm__ Bucket<K, V, S>*>(buckets_gm);
-  __gm__ int32_t* __restrict__ buckets_size =
-      reinterpret_cast<__gm__ int32_t*>(buckets_size_gm);
-  __gm__ const K* __restrict__ keys =
-      reinterpret_cast<__gm__ const K*>(keys_gm);
-  __gm__ VecV* __gm__* __restrict__ value_ptrs =
-      reinterpret_cast<__gm__ VecV * __gm__*>(value_ptrs_gm);
-  __gm__ K* __gm__* __restrict__ key_ptrs =
-      reinterpret_cast<__gm__ K * __gm__*>(key_ptrs_gm);
-  __gm__ bool* __restrict__ founds = reinterpret_cast<__gm__ bool*>(founds_gm);
-  __gm__ S* __restrict__ scores = reinterpret_cast<__gm__ S*>(scores_gm);
   S score = static_cast<S>(EMPTY_SCORE);
   constexpr uint32_t STRIDE = sizeof(VecD_Comp) / sizeof(D);
 
   uint32_t key_pos = 0;
   K key = 0;
   __gm__ K* bucket_keys = nullptr;
-  __gm__ VecV* bucket_values = nullptr;
+  __gm__ V* bucket_values = nullptr;
   __gm__ S* bucket_scores = nullptr;
   __gm__ int32_t* bucket_size = nullptr;
   for (uint64_t kv_idx = blockIdx * blockDim.x + threadIdx.x;
@@ -116,8 +93,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_lock_key_vf_v
         int32_t cur_bucket_size = *bucket_size;
         __gm__ Bucket<K, V, S>* bucket = buckets + bkt_idx;
         bucket_keys = bucket->keys_;
-        bucket_values = reinterpret_cast<__gm__ VecV*>(
-            reinterpret_cast<__gm__ void*>(bucket->vectors));
+        bucket_values = bucket->vectors;
         bucket_scores = bucket->scores_;
 
         // 3. 遍历桶，找key/空位
@@ -310,7 +286,7 @@ LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_lock_key_vf_v
 
 template <typename K>
 __simt_vf__ __aicore__
-LAUNCH_BOUND(THREAD_NUM_512) inline void find_or_insert_ptr_kernel_unlock_key_vf(
+LAUNCH_BOUND(THREAD_NUM_2048) inline void find_or_insert_ptr_kernel_unlock_key_vf(
     __gm__ const K* __restrict__ keys, __gm__ K* __gm__* __restrict__ key_ptrs,
     uint64_t n, uint64_t thread_all, uint32_t blockIdx) {
   uint64_t kv_idx = blockIdx * blockDim.x + threadIdx.x;
@@ -413,9 +389,9 @@ template <class K, class V, class S, int Strategy = -1>
 __global__ __vector__ void find_or_insert_ptr_kernel_lock_key_v2(
     __gm__ Bucket<K, V, S>* buckets, __gm__ int32_t* buckets_size,
     uint64_t buckets_num, uint32_t bucket_capacity, uint32_t dim,
-    __gm__ const K* keys, __gm__ void* value_ptrs, __gm__ S* scores,
-    __gm__ K* __gm__* key_ptrs, uint64_t n, __gm__ bool* founds,
-    uint64_t global_epoch, uint32_t value_size, uint32_t max_bucket_shift,
+    __gm__ const K* keys, __gm__ V * __gm__ * value_ptrs, __gm__ S* scores,
+    __gm__ K * __gm__ * key_ptrs, uint64_t n, __gm__ bool* founds,
+    uint64_t global_epoch, uint32_t max_bucket_shift,
     uint64_t capacity_divisor_magic, uint64_t capacity_divisor_shift,
     uint64_t n_align_warp, uint64_t capacity) {
   const uint64_t thread_all = THREAD_NUM_512 * GetBlockNum();
@@ -424,23 +400,20 @@ __global__ __vector__ void find_or_insert_ptr_kernel_lock_key_v2(
                            ? static_cast<uint64_t>(GetSystemCycle())
                            : 0;
 
-  DISPATCH_VALUE_SIZE(
-      value_size,
-      (asc_vf_call<
-          find_or_insert_ptr_kernel_lock_key_vf_v2<K, V, S, DTYPE, Strategy>>(
-          dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
-          buckets_num, bucket_capacity, dim, keys, value_ptrs, scores, key_ptrs,
-          n, founds, global_epoch, cur_score, GetBlockIdx(), thread_all,
-          max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift,
-          n_align_warp, capacity)));
+  asc_vf_call<find_or_insert_ptr_kernel_lock_key_vf_v2<K, V, S, Strategy>>(
+      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, buckets, buckets_size,
+      buckets_num, bucket_capacity, dim, keys, value_ptrs, scores, key_ptrs, n,
+      founds, global_epoch, cur_score, GetBlockIdx(), thread_all,
+      max_bucket_shift, capacity_divisor_magic, capacity_divisor_shift,
+      n_align_warp, capacity);
 }
 
 template <class K>
 __global__ __vector__ void find_or_insert_ptr_kernel_unlock_key_v2(
     __gm__ const K* keys, __gm__ K* __gm__* key_ptrs, uint64_t n) {
-  const uint64_t thread_all = THREAD_NUM_512 * GetBlockNum();
+  const uint64_t thread_all = THREAD_NUM_2048 * GetBlockNum();
   asc_vf_call<find_or_insert_ptr_kernel_unlock_key_vf<K>>(
-      dim3{static_cast<uint32_t>(THREAD_NUM_512)}, keys, key_ptrs, n,
+      dim3{static_cast<uint32_t>(THREAD_NUM_2048)}, keys, key_ptrs, n,
       thread_all, GetBlockIdx());
 }
 
