@@ -90,6 +90,44 @@ int main(int args, char *argv[])
 }
 ```
 
+### 环境变量配置
+
+`HKV_NPU_ALLOC_CONF`环境变量控制Bucket内存分配策略，配置格式如下：
+
+```
+HKV_NPU_ALLOC_CONF=buckets_mem_pool=<enable|disable>;page_table=<1g|2m>
+```
+
+| 配置项 | 可选值 | 说明 |
+|--------|--------|------|
+| `buckets_mem_pool` | `enable` | 内存池模式：预分配整个内存池，使用大页（2M/1G），降低TLB Miss，提高性能，默认开启内存池，页表默认为2M |
+| `buckets_mem_pool` | `disable` | 非内存池模式：该模式与开源社区一致，即按需申请，该模式TLB Miss较高，性能不如内存池模式，同时capacity设置过大会存在大量内存碎片导致内存申请失败，建议开发者使用内存池模式 |
+| `page_table` | `2m` | 使用2MB大页（默认） |
+| `page_table` | `1g` | 使用1GB大页，适合超大规模场景 |
+
+**配置示例：**
+```bash
+# 非内存池模式，内存占用小，适合小规模场景
+export HKV_NPU_ALLOC_CONF="buckets_mem_pool=disable"
+
+# 内存池模式，使用2MB大页（默认配置）
+export HKV_NPU_ALLOC_CONF="buckets_mem_pool=enable;page_table=2m"
+
+# 内存池模式，使用1GB大页，适合超大规模场景
+export HKV_NPU_ALLOC_CONF="buckets_mem_pool=enable;page_table=1g"
+```
+
+`HKV_TEST_DEVICE`环境变量指定运行所使用的NPU卡号，不设置时默认为0。
+
+**配置示例：**
+```bash
+# 指定在NPU卡1上运行
+export HKV_TEST_DEVICE=1
+
+# 指定在NPU卡3上运行
+export HKV_TEST_DEVICE=3
+```
+
 ### 使用约束
 
 - `key_type`必须为`uint64_t`或`int64_t`
