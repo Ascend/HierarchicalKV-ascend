@@ -31,44 +31,42 @@
 #include <shared_mutex>
 #include <string>
 #include <type_traits>
+#include "aclnn_helper.h"
+#include "aclnnop/aclnn_reduce_sum.h"
+#include "bucket_memory_pool_manager.h"
+#include "group_lock.h"
+#include "hashtable_options.h"
+#include "kernels/accum_or_assign_kernel/accum_or_assign_kernel.h"
+#include "kernels/accum_or_assign_kernel/accum_or_assign_kernel_hybrid.h"
+#include "kernels/assign_kernel/assign_kernel.h"
+#include "kernels/assign_scores_kernel/assign_scores_kernel_with_filter.h"
+#include "kernels/assign_values_kernel/assign_values_kernel.h"
+#include "kernels/clear_kernel/clear_kernel.h"
+#include "kernels/contains_kernel/contains_kernel.h"
 #include "kernels/dump_kernel/dump_kernel.h"
 #include "kernels/dump_kernel/dump_kernel_if.h"
 #include "kernels/dump_kernel/dump_kernel_if_v2.h"
-#include "kernels/rehash_kernel/rehash_kernel.h"
-#include "kernels/clear_kernel/clear_kernel.h"
 #include "kernels/find_and_update_kernel/find_and_update_kernel_with_filter.h"
-#include "kernels/find_and_update_kernel/find_and_update_kernel.h"
-#include "kernels/find_ptr_kernel/find_ptr_with_digest_kernel.h"
-#include "kernels/find_ptr_kernel/find_ptr_kernel.h"
-#include "kernels/find_kernel/find_with_digest_kernel.h"
 #include "kernels/find_kernel/find_miss_with_digest_kernel.h"
 #include "kernels/find_kernel/find_miss_with_digest_kernel_hybrid.h"
-#include "kernels/utils_kernel/utils_kernel.h"
-#include "kernels/contains_kernel/contains_kernel.h"
-#include "kernels/assign_scores_kernel/assign_scores_kernel_with_filter.h"
-#include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
+#include "kernels/find_kernel/find_with_digest_kernel.h"
 #include "kernels/find_or_insert_kernel/find_or_insert_kernel.h"
-#include "kernels/insert_or_assign_kernel/insert_or_assign_kernel.h"
-#include "tiling_helper.h"
-#include "kernels/lock_keys_kernel/lock_keys_kernel.h"
-#include "kernels/unlock_keys_kernel/unlock_keys_kernel.h"
+#include "kernels/find_or_insert_ptr_kernel/find_or_insert_ptr_kernel_v2.h"
+#include "kernels/find_ptr_kernel/find_ptr_with_digest_kernel.h"
 #include "kernels/insert_and_evict_kernel/insert_and_evict_kernel.h"
-#include "kernels/traverse_kernel/traverse_kernel.h"
+#include "kernels/insert_or_assign_kernel/insert_or_assign_kernel.h"
+#include "kernels/lock_keys_kernel/lock_keys_kernel.h"
+#include "kernels/rehash_kernel/rehash_kernel.h"
 #include "kernels/remove_kernel/remove_kernel.h"
-#include "kernels/assign_values_kernel/assign_values_kernel.h"
-#include "kernels/assign_kernel/assign_kernel.h"
 #include "kernels/size_if_kernel/size_if_kernel.h"
-#include "kernels/accum_or_assign_kernel/accum_or_assign_kernel.h"
-#include "kernels/accum_or_assign_kernel/accum_or_assign_kernel_hybrid.h"
-#include "aclnn_helper.h"
-#include "aclnnop/aclnn_reduce_sum.h"
-#include "group_lock.h"
-#include "bucket_memory_pool_manager.h"
-#include "hashtable_options.h"
+#include "kernels/traverse_kernel/traverse_kernel.h"
+#include "kernels/unlock_keys_kernel/unlock_keys_kernel.h"
+#include "kernels/utils_kernel/utils_kernel.h"
 #include "memory_pool.h"
 #include "simt_vf_dispatcher.h"
 #include "table.h"
 #include "tiling/platform/platform_ascendc.h"
+#include "tiling_helper.h"
 #include "types.h"
 #include "utils.h"
 
@@ -987,7 +985,10 @@ class HashTable : public HashTableBase<K, V, S> {
       NPU_CHECK(aclrtGetDevice(&(options_.device_id)));
     }
 
-    HKV_CHECK((options_.max_bucket_size >= 16 ),
+    // Allocate device-side counters for mutex after device context is ready.
+    mutex_.init();
+
+    HKV_CHECK((options_.max_bucket_size >= 16),
               "Bucket size should be greater than or equal to 16");
     HKV_CHECK(ispow2(static_cast<uint32_t>(options_.max_bucket_size)),
               "Bucket size should be the pow of 2");
@@ -1007,8 +1008,8 @@ class HashTable : public HashTableBase<K, V, S> {
         "of cache line size");
 
     // Initialize bucket memory pool manager and construct table.
-    bucket_memory_pool_manager_ =
-        std::make_unique<BucketMemoryPoolManager<key_type, value_type, score_type>>();
+    bucket_memory_pool_manager_ = std::make_unique<
+        BucketMemoryPoolManager<key_type, value_type, score_type>>();
     bucket_memory_pool_manager_->initialize(options_);
     create_table<key_type, value_type, score_type>(
         &table_, allocator_, block_dim_, options_.dim, options_.init_capacity,
@@ -1021,8 +1022,7 @@ class HashTable : public HashTableBase<K, V, S> {
     HKV_CHECK((!(options_.io_by_cpu && options_.max_hbm_for_vectors != 0)),
               "[HierarchicalKV] `io_by_cpu` should not be true when "
               "`max_hbm_for_vectors` is not 0!");
-    allocator_->alloc(MemoryType::Device, (void**)&(d_table_),
-                      sizeof(TableCore));
+    allocator_->alloc(MemoryType::Device, &d_table_, sizeof(TableCore));
 
     sync_table_configuration();
 
@@ -1281,10 +1281,10 @@ class HashTable : public HashTableBase<K, V, S> {
     if (n == 0) {
       return;
     }
-    if (keys == nullptr || values == nullptr || evicted_keys == nullptr || 
+    if (keys == nullptr || values == nullptr || evicted_keys == nullptr ||
         evicted_values == nullptr || d_evicted_counter == nullptr) {
- 	    return;
- 	  }
+      return;
+    }
 
     while (!reach_max_capacity_ &&
            fast_load_factor(n, stream) > options_.max_load_factor) {
@@ -1307,22 +1307,27 @@ class HashTable : public HashTableBase<K, V, S> {
 
     uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     if (unique_key) {
-      insert_and_evict_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->buckets_size,
-        table_->capacity, options_.max_bucket_size, value_move_opt_.dim,
-        const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
-        const_cast<score_type*>(scores), evicted_keys, static_cast<void*>(evicted_values),
-        evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
-        table_->max_bucket_shift, table_->capacity_divisor_magic,
-        table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+      insert_and_evict_kernel<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->buckets_size, table_->capacity,
+              options_.max_bucket_size, value_move_opt_.dim,
+              const_cast<key_type*>(keys),
+              static_cast<void*>(const_cast<value_type*>(values)),
+              const_cast<score_type*>(scores), evicted_keys,
+              static_cast<void*>(evicted_values), evicted_scores,
+              d_evicted_counter, n, global_epoch_, value_move_opt_.size,
+              table_->max_bucket_shift, table_->capacity_divisor_magic,
+              table_->capacity_divisor_shift, n_align_warp,
+              value_move_opt_.cg_size);
     } else {
-      insert_and_evict_non_unique_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->buckets_size, table_->capacity,
-        options_.max_bucket_size, value_move_opt_.dim,
-        keys, values, scores, evicted_keys, evicted_values,
-        evicted_scores, d_evicted_counter, n, global_epoch_, value_move_opt_.size,
-        table_->max_bucket_shift, table_->capacity_divisor_magic,
-        table_->capacity_divisor_shift);
+      insert_and_evict_non_unique_kernel<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->buckets_size, table_->capacity,
+              options_.max_bucket_size, value_move_opt_.dim, keys, values,
+              scores, evicted_keys, evicted_values, evicted_scores,
+              d_evicted_counter, n, global_epoch_, value_move_opt_.size,
+              table_->max_bucket_shift, table_->capacity_divisor_magic,
+              table_->capacity_divisor_shift);
     }
 
     NpuCheckError();
@@ -1385,15 +1390,17 @@ class HashTable : public HashTableBase<K, V, S> {
     }
     auto dev_ws{dev_mem_pool_->get_workspace<1>(sizeof(size_type), stream)};
     auto d_evicted_counter{dev_ws.get<size_type*>(0)};
-    NPU_CHECK(aclrtMemset(d_evicted_counter, sizeof(size_type), 0, sizeof(size_type)));
+    NPU_CHECK(aclrtMemset(d_evicted_counter, sizeof(size_type), 0,
+                          sizeof(size_type)));
 
-    insert_and_evict(n, keys, values, scores, evicted_keys, evicted_values, evicted_scores, d_evicted_counter,
-                     stream, unique_key, ignore_evict_strategy);
+    insert_and_evict(n, keys, values, scores, evicted_keys, evicted_values,
+                     evicted_scores, d_evicted_counter, stream, unique_key,
+                     ignore_evict_strategy);
 
     size_type h_evicted_counter = 0;
     NPU_CHECK(aclrtMemcpyAsync(&h_evicted_counter, sizeof(size_type),
-              d_evicted_counter, sizeof(size_type),
-              ACL_MEMCPY_DEVICE_TO_HOST, stream));
+                               d_evicted_counter, sizeof(size_type),
+                               ACL_MEMCPY_DEVICE_TO_HOST, stream));
     NPU_CHECK(aclrtSynchronizeStream(stream));
     NpuCheckError();
     return h_evicted_counter;
@@ -1446,9 +1453,12 @@ class HashTable : public HashTableBase<K, V, S> {
                        const score_type* scores = nullptr,  // (n)
                        aclrtStream stream = 0,
                        bool ignore_evict_strategy = false) {
-    if constexpr (std::is_same<value_type, double>::value || std::is_same<value_type, uint16_t>::value ||
+    if constexpr (std::is_same<value_type, double>::value ||
+                  std::is_same<value_type, uint16_t>::value ||
                   std::is_same<value_type, uint32_t>::value) {
-      throw std::runtime_error("[accum_or_assign] Does not support double or uint16_t value_type.");
+      throw std::runtime_error(
+          "[accum_or_assign] Does not support double/uint16_t/uint32_t "
+          "value_type.");
     } else {
       if (n == 0) {
         return;
@@ -1469,14 +1479,13 @@ class HashTable : public HashTableBase<K, V, S> {
       }
 
       if (is_fast_mode()) {
-        accum_or_assign_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-            table_->buckets, table_->buckets_size,
-            table_->capacity, table_->bucket_max_size, options_.dim,
-            keys, value_or_deltas,
-            accum_or_assigns, scores,
-            n, global_epoch_,
-            table_->max_bucket_shift, table_->capacity_divisor_magic,
-            table_->capacity_divisor_shift);
+        accum_or_assign_kernel<K, V, S, evict_strategy>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->buckets_size, table_->capacity,
+                table_->bucket_max_size, options_.dim, keys, value_or_deltas,
+                accum_or_assigns, scores, n, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift);
       } else {
         size_t size_all = n * sizeof(value_type*) + n * sizeof(bool);
         auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
@@ -1487,21 +1496,21 @@ class HashTable : public HashTableBase<K, V, S> {
 
         accum_or_assign_lock_key_hybrid_kernel<K, V, S, evict_strategy>
             <<<block_dim_, 0, stream>>>(
-                table_->buckets, table_->buckets_size,
-                table_->capacity, table_->bucket_max_size, table_->dim,
-                keys, accum_or_assigns, scores,
-                n, global_epoch_,
-                table_->max_bucket_shift, table_->capacity_divisor_magic,
-                table_->capacity_divisor_shift,
+                table_->buckets, table_->buckets_size, table_->capacity,
+                table_->bucket_max_size, table_->dim, keys, accum_or_assigns,
+                scores, n, global_epoch_, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
                 d_dst_values, d_accum_or_assigns);
 
         auto tiling =
-            GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), true, TRIPLE_BUFFER * DOUBLE_BUFFER);
-        write_with_accum_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
-            tiling.former_num, tiling.former_core_move_num,
-            tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
-            table_->dim, const_cast<value_type*>(value_or_deltas), n,
-            d_dst_values, d_accum_or_assigns);
+            GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type),
+                               true, TRIPLE_BUFFER * DOUBLE_BUFFER);
+        write_with_accum_kernel<V>
+            <<<block_dim_, tiling.valid_ub_size, stream>>>(
+                tiling.former_num, tiling.former_core_move_num,
+                tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+                table_->dim, const_cast<value_type*>(value_or_deltas), n,
+                d_dst_values, d_accum_or_assigns);
       }
 
       NpuCheckError();
@@ -1844,10 +1853,10 @@ class HashTable : public HashTableBase<K, V, S> {
    * @param unique_key If all keys in the same batch are unique.
    */
   void assign(const size_type n,
-    const key_type* keys,                // (n)
-    const value_type* values,            // (n, DIM)
-    const score_type* scores = nullptr,  // (n)
-    aclrtStream stream = 0, bool unique_key = true) {
+              const key_type* keys,                // (n)
+              const value_type* values,            // (n, DIM)
+              const score_type* scores = nullptr,  // (n)
+              aclrtStream stream = 0, bool unique_key = true) {
     if (n == 0) {
       return;
     }
@@ -1858,19 +1867,23 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     if (is_fast_mode()) {
-      constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
+      constexpr uint32_t MinBucketCapacityFilter =
+          sizeof(VecD_Load) / sizeof(D);
       if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
         uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
         assign_kernel<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-          keys, static_cast<const void*>(values), scores, n, global_epoch_, value_move_opt_.size,
-          table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+            table_->buckets, table_->capacity, table_->bucket_max_size,
+            value_move_opt_.dim, keys, static_cast<const void*>(values), scores,
+            n, global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
+            table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+            n_align_warp, value_move_opt_.cg_size);
       } else {
-        assign_kernel_with_io<K, V, S, evict_strategy, true><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
-          keys, values, scores, n, nullptr, global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift);
+        assign_kernel_with_io<K, V, S, evict_strategy, true>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->capacity, table_->bucket_max_size,
+                static_cast<uint32_t>(options_.dim), keys, values, scores, n,
+                nullptr, global_epoch_, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift);
       }
     } else {
       bool filter_condition = unique_key && !options_.io_by_cpu;
@@ -1880,23 +1893,24 @@ class HashTable : public HashTableBase<K, V, S> {
         auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
         auto temp_storage{dev_ws.get<uint8_t*>(0)};
         value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
-        key_type** d_dst_keys{
-          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+        key_type** d_dst_keys{reinterpret_cast<key_type**>(
+            temp_storage + n * sizeof(value_type*))};
 
-        assign_kernel_lock_key_hybrid<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-          table_->buckets,
-          table_->capacity, table_->bucket_max_size, table_->dim,
-          keys, scores, n, global_epoch_, table_->max_bucket_shift,
-          table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-          n_align_warp, d_dst_values, d_dst_keys);
+        assign_kernel_lock_key_hybrid<K, V, S, evict_strategy>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->capacity, table_->bucket_max_size,
+                table_->dim, keys, scores, n, global_epoch_,
+                table_->max_bucket_shift, table_->capacity_divisor_magic,
+                table_->capacity_divisor_shift, n_align_warp, d_dst_values,
+                d_dst_keys);
 
-        auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+        auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                         sizeof(value_type), false);
         write_kernel<K, V, true><<<block_dim_, tiling.valid_ub_size, stream>>>(
-          tiling.former_num, tiling.former_core_move_num,
-          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
-          table_->dim, const_cast<key_type*>(keys),
-          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+            tiling.former_num, tiling.former_core_move_num,
+            tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+            table_->dim, const_cast<key_type*>(keys),
+            const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
       } else {
         size_t dst_ptr_size = n * sizeof(value_type*);
         auto dev_ws{dev_mem_pool_->get_workspace<1>(dst_ptr_size, stream)};
@@ -1905,10 +1919,12 @@ class HashTable : public HashTableBase<K, V, S> {
         NPU_CHECK(aclrtMemsetAsync(temp_storage, dst_ptr_size, 0, dst_ptr_size,
                                    stream));
 
-        assign_kernel_with_io<K, V, S, evict_strategy, false><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
-          keys, values, scores, n, d_dst_values, global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift);
+        assign_kernel_with_io<K, V, S, evict_strategy, false>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->capacity, table_->bucket_max_size,
+                static_cast<uint32_t>(options_.dim), keys, values, scores, n,
+                d_dst_values, global_epoch_, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift);
         if (options_.io_by_cpu) {
           size_t value_size = n * table_->dim * sizeof(value_type);
 
@@ -1917,7 +1933,7 @@ class HashTable : public HashTableBase<K, V, S> {
           auto host_storage{host_ws.get<uint8_t*>(0)};
           value_type* h_values{reinterpret_cast<value_type*>(host_storage)};
           value_type** h_dst_values{reinterpret_cast<value_type**>(
-            host_storage + n * table_->dim * sizeof(value_type))};
+              host_storage + n * table_->dim * sizeof(value_type))};
           NPU_CHECK(aclrtMemcpyAsync(h_values, value_size, values, value_size,
                                      ACL_MEMCPY_DEVICE_TO_HOST, stream));
           NPU_CHECK(aclrtMemcpyAsync(h_dst_values, dst_ptr_size, d_dst_values,
@@ -1961,9 +1977,9 @@ class HashTable : public HashTableBase<K, V, S> {
    * @param unique_key If all keys in the same batch are unique.
    */
   void assign_scores(const size_type n,
-    const key_type* keys,                // (n)
-    const score_type* scores = nullptr,  // (n)
-    aclrtStream stream = 0, bool unique_key = true) {
+                     const key_type* keys,                // (n)
+                     const score_type* scores = nullptr,  // (n)
+                     aclrtStream stream = 0, bool unique_key = true) {
     if (n == 0) {
       return;
     }
@@ -1977,17 +1993,21 @@ class HashTable : public HashTableBase<K, V, S> {
 
     constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
     if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
-      assign_scores_kernel_with_filter<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->capacity, options_.max_bucket_size,
-        options_.dim, const_cast<key_type*>(keys),
-        const_cast<score_type*>(scores), n, global_epoch_,
-        table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      assign_scores_kernel_with_filter<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->capacity, options_.max_bucket_size,
+              options_.dim, const_cast<key_type*>(keys),
+              const_cast<score_type*>(scores), n, global_epoch_,
+              table_->max_bucket_shift, table_->capacity_divisor_magic,
+              table_->capacity_divisor_shift);
     } else {
-      assign_scores_kernel_with_io<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(
-        table_->buckets, table_->capacity, options_.max_bucket_size,
-        options_.dim, const_cast<key_type*>(keys),
-        const_cast<score_type*>(scores), n, global_epoch_,
-        table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      assign_scores_kernel_with_io<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->capacity, options_.max_bucket_size,
+              options_.dim, const_cast<key_type*>(keys),
+              const_cast<score_type*>(scores), n, global_epoch_,
+              table_->max_bucket_shift, table_->capacity_divisor_magic,
+              table_->capacity_divisor_shift);
     }
     NpuCheckError();
   }
@@ -2017,9 +2037,9 @@ class HashTable : public HashTableBase<K, V, S> {
    * @param unique_key If all keys in the same batch are unique.
    */
   void assign_values(const size_type n,
-    const key_type* keys,      // (n)
-    const value_type* values,  // (n, DIM)
-    aclrtStream stream = 0, bool unique_key = true) {
+                     const key_type* keys,      // (n)
+                     const value_type* values,  // (n, DIM)
+                     aclrtStream stream = 0, bool unique_key = true) {
     if (n == 0) {
       return;
     }
@@ -2030,19 +2050,24 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     if (is_fast_mode()) {
-      constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
+      constexpr uint32_t MinBucketCapacityFilter =
+          sizeof(VecD_Load) / sizeof(D);
       if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
         uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
         assign_values_kernel<K, V, S><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size, value_move_opt_.dim,
-          const_cast<key_type*>(keys), static_cast<void*>(const_cast<value_type*>(values)),
-          n, value_move_opt_.size, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift, n_align_warp, value_move_opt_.cg_size);
+            table_->buckets, table_->capacity, table_->bucket_max_size,
+            value_move_opt_.dim, const_cast<key_type*>(keys),
+            static_cast<void*>(const_cast<value_type*>(values)), n,
+            value_move_opt_.size, table_->max_bucket_shift,
+            table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+            n_align_warp, value_move_opt_.cg_size);
       } else {
         assign_values_kernel_with_io<K, V, S, true><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size,
-          static_cast<uint32_t>(options_.dim), const_cast<key_type*>(keys), const_cast<value_type*>(values),
-          n, nullptr, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+            table_->buckets, table_->capacity, table_->bucket_max_size,
+            static_cast<uint32_t>(options_.dim), const_cast<key_type*>(keys),
+            const_cast<value_type*>(values), n, nullptr,
+            table_->max_bucket_shift, table_->capacity_divisor_magic,
+            table_->capacity_divisor_shift);
       }
     } else {
       bool filter_condition = unique_key && !options_.io_by_cpu;
@@ -2052,23 +2077,23 @@ class HashTable : public HashTableBase<K, V, S> {
         auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
         auto temp_storage{dev_ws.get<uint8_t*>(0)};
         value_type** d_dst_values{reinterpret_cast<value_type**>(temp_storage)};
-        key_type** d_dst_keys{
-          reinterpret_cast<key_type**>(temp_storage + n * sizeof(value_type*))};
+        key_type** d_dst_keys{reinterpret_cast<key_type**>(
+            temp_storage + n * sizeof(value_type*))};
 
-        assign_values_kernel_lock_key_hybrid<K, V, S><<<block_dim_, 0, stream>>>(
-          table_->buckets, 
-          table_->capacity, table_->bucket_max_size, table_->dim,
-          keys, n, table_->max_bucket_shift,
-          table_->capacity_divisor_magic, table_->capacity_divisor_shift,
-          n_align_warp, d_dst_values, d_dst_keys);
+        assign_values_kernel_lock_key_hybrid<K, V, S>
+            <<<block_dim_, 0, stream>>>(
+                table_->buckets, table_->capacity, table_->bucket_max_size,
+                table_->dim, keys, n, table_->max_bucket_shift,
+                table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+                n_align_warp, d_dst_values, d_dst_keys);
 
-        auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+        auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                         sizeof(value_type), false);
         write_kernel<K, V, true><<<block_dim_, tiling.valid_ub_size, stream>>>(
-          tiling.former_num, tiling.former_core_move_num,
-          tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
-          table_->dim, const_cast<key_type*>(keys),
-          const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
+            tiling.former_num, tiling.former_core_move_num,
+            tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
+            table_->dim, const_cast<key_type*>(keys),
+            const_cast<value_type*>(values), n, d_dst_values, d_dst_keys);
       } else {
         size_t dst_ptr_size = n * sizeof(value_type*);
         auto dev_ws{dev_mem_pool_->get_workspace<1>(dst_ptr_size, stream)};
@@ -2078,10 +2103,11 @@ class HashTable : public HashTableBase<K, V, S> {
                                    stream));
 
         assign_values_kernel_with_io<K, V, S, false><<<block_dim_, 0, stream>>>(
-          table_->buckets, table_->capacity, table_->bucket_max_size, static_cast<uint32_t>(options_.dim),
-          const_cast<key_type*>(keys), const_cast<value_type*>(values),
-          n, d_dst_values, table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift);
+            table_->buckets, table_->capacity, table_->bucket_max_size,
+            static_cast<uint32_t>(options_.dim), const_cast<key_type*>(keys),
+            const_cast<value_type*>(values), n, d_dst_values,
+            table_->max_bucket_shift, table_->capacity_divisor_magic,
+            table_->capacity_divisor_shift);
         if (options_.io_by_cpu) {
           size_t value_size = n * table_->dim * sizeof(value_type);
 
@@ -2145,14 +2171,13 @@ class HashTable : public HashTableBase<K, V, S> {
       lock_ptr = std::make_unique<read_shared_lock>(mutex_, stream);
     }
 
-    uint64_t n_align_warp =
-        ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     if (is_fast_mode()) {
       find_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
           table_->buckets, table_->capacity, table_->buckets_num,
           static_cast<uint32_t>(table_->bucket_max_size), value_move_opt_.dim,
-          const_cast<key_type*>(keys), values, scores, founds, n,
-          global_epoch_, value_move_opt_.size, table_->max_bucket_shift,
+          const_cast<key_type*>(keys), values, scores, founds, n, global_epoch_,
+          value_move_opt_.size, table_->max_bucket_shift,
           table_->capacity_divisor_magic, table_->capacity_divisor_shift,
           n_align_warp, value_move_opt_.cg_size);
     } else {
@@ -2168,8 +2193,8 @@ class HashTable : public HashTableBase<K, V, S> {
           global_epoch_, table_->max_bucket_shift,
           table_->capacity_divisor_magic, table_->capacity_divisor_shift);
 
-      auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+      auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                       sizeof(value_type), false);
       read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
           tiling.former_num, tiling.former_core_move_num,
           tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
@@ -2209,15 +2234,15 @@ class HashTable : public HashTableBase<K, V, S> {
     if (n == 0) {
       return;
     }
-    NPU_CHECK(aclrtMemsetAsync(missed_size, sizeof(int), 0, sizeof(int), stream));
-    
+    NPU_CHECK(
+        aclrtMemsetAsync(missed_size, sizeof(int), 0, sizeof(int), stream));
+
     std::unique_ptr<read_shared_lock> lock_ptr;
     if (options_.api_lock) {
       lock_ptr = std::make_unique<read_shared_lock>(mutex_, stream);
     }
 
-    uint64_t n_align_warp =
-        ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    uint64_t n_align_warp = ((n + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
     if (is_fast_mode()) {
       find_miss_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
           table_->buckets, table_->capacity,
@@ -2236,13 +2261,13 @@ class HashTable : public HashTableBase<K, V, S> {
       find_miss_with_digest_kernel_hybrid<K, V, S><<<block_dim_, 0, stream>>>(
           table_->buckets, table_->capacity,
           static_cast<uint32_t>(options_.max_bucket_size), table_->dim,
-          const_cast<key_type*>(keys), d_src_values, scores,
-          missed_keys, missed_indices, missed_size, n,
-          table_->max_bucket_shift, table_->capacity_divisor_magic,
-          table_->capacity_divisor_shift, n_align_warp);
+          const_cast<key_type*>(keys), d_src_values, scores, missed_keys,
+          missed_indices, missed_size, n, table_->max_bucket_shift,
+          table_->capacity_divisor_magic, table_->capacity_divisor_shift,
+          n_align_warp);
 
-      auto tiling =
-          GetValueMoveTiling(n, block_dim_, table_->dim, sizeof(value_type), false);
+      auto tiling = GetValueMoveTiling(n, block_dim_, table_->dim,
+                                       sizeof(value_type), false);
       read_value_kernel<V><<<block_dim_, tiling.valid_ub_size, stream>>>(
           tiling.former_num, tiling.former_core_move_num,
           tiling.tail_core_move_num, tiling.tile_size, tiling.num_tiles,
@@ -2288,9 +2313,10 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     find_ptr_with_digest_kernel<K, V, S><<<block_dim_, 0, stream>>>(
-      table_->buckets, table_->capacity, table_->buckets_num, options_.max_bucket_size,
-      options_.dim, const_cast<key_type*>(keys), values, scores, founds, n, global_epoch_,
-      table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+        table_->buckets, table_->capacity, table_->buckets_num,
+        options_.max_bucket_size, options_.dim, const_cast<key_type*>(keys),
+        values, scores, founds, n, global_epoch_, table_->max_bucket_shift,
+        table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     NpuCheckError();
   }
 
@@ -2333,9 +2359,12 @@ class HashTable : public HashTableBase<K, V, S> {
     check_evict_strategy(scores);
     constexpr uint32_t MinBucketCapacityFilter = sizeof(VecD_Load) / sizeof(D);
     if (unique_key && options_.max_bucket_size >= MinBucketCapacityFilter) {
-      find_and_update_kernel_with_filter<K, V, S, evict_strategy><<<block_dim_, 0, stream>>>(table_->buckets,
-        table_->capacity, options_.max_bucket_size, options_.dim, const_cast<key_type*>(keys), values, scores, founds, n, true,
-        global_epoch_, table_->max_bucket_shift, table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+      find_and_update_kernel_with_filter<K, V, S, evict_strategy>
+          <<<block_dim_, 0, stream>>>(
+              table_->buckets, table_->capacity, options_.max_bucket_size,
+              options_.dim, const_cast<key_type*>(keys), values, scores, founds,
+              n, true, global_epoch_, table_->max_bucket_shift,
+              table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     } else {
       throw std::runtime_error(
           "Not support update score when keys are not unique or bucket "
@@ -2368,10 +2397,10 @@ class HashTable : public HashTableBase<K, V, S> {
     }
 
     contains_kernel<K, V, S><<<block_dim_, 0, stream>>>(
-      table_->buckets, table_->capacity,
-      static_cast<uint32_t>(table_->bucket_max_size),
-      const_cast<key_type*>(keys), founds, n, table_->max_bucket_shift,
-      table_->capacity_divisor_magic, table_->capacity_divisor_shift);
+        table_->buckets, table_->capacity,
+        static_cast<uint32_t>(table_->bucket_max_size),
+        const_cast<key_type*>(keys), founds, n, table_->max_bucket_shift,
+        table_->capacity_divisor_magic, table_->capacity_divisor_shift);
     NpuCheckError();
   }
 
@@ -2513,8 +2542,10 @@ class HashTable : public HashTableBase<K, V, S> {
       lock_ptr = std::make_unique<update_read_lock>(mutex_, stream);
     }
 
-    clear_kernel<K, V, S><<<block_dim_, 0, stream>>>(static_cast<void*>(table_->buckets),
-      static_cast<void*>(table_->buckets_size), options_.max_bucket_size, table_->capacity);
+    clear_kernel<K, V, S>
+        <<<block_dim_, 0, stream>>>(static_cast<void*>(table_->buckets),
+                                    static_cast<void*>(table_->buckets_size),
+                                    options_.max_bucket_size, table_->capacity);
     NpuCheckError();
   }
 
@@ -2787,8 +2818,8 @@ class HashTable : public HashTableBase<K, V, S> {
    * @param last The last element(excluding) to which the function object will
    * be applied.
    * @param f A functor of type `ExecutionFunc` that defines the predicate for
-   * filtering tuples. signature:  __simt_callee__ (bool*)(const K&, const V*, const
-   * S&, int32_t).
+   * filtering tuples. signature:  __simt_callee__ (bool*)(const K&, const V*,
+   * const S&, int32_t).
    * @param stream The CANN stream that is used to execute the operation.
    *
    * @return void
@@ -2884,7 +2915,7 @@ class HashTable : public HashTableBase<K, V, S> {
         table_->buckets, table_->capacity, table_->bucket_max_size,
         table_->max_bucket_shift, table_->capacity_divisor_magic,
         table_->capacity_divisor_shift, pattern, threshold, d_counter);
-    
+
     NpuCheckError();
   }
 
@@ -3014,8 +3045,8 @@ class HashTable : public HashTableBase<K, V, S> {
     }
     options_.max_capacity = new_max_capacity;
     if (bucket_memory_pool_manager_ != nullptr &&
-      bucket_memory_pool_manager_->use_pool()) {
-        bucket_memory_pool_manager_->set_max_capacity(new_max_capacity);
+        bucket_memory_pool_manager_->use_pool()) {
+      bucket_memory_pool_manager_->set_max_capacity(new_max_capacity);
     }
   }
 
@@ -3070,7 +3101,7 @@ class HashTable : public HashTableBase<K, V, S> {
     HKV_CHECK(max_workspace_size >= tuple_size,
               "[HierarchicalKV] max_workspace_size is smaller than a single "
               "`key + score + value` tuple! Please set a larger value!");
-    
+
     std::unique_ptr<update_read_lock> lock_ptr;
     if (options_.api_lock) {
       lock_ptr = std::make_unique<update_read_lock>(mutex_, stream);
@@ -3099,25 +3130,27 @@ class HashTable : public HashTableBase<K, V, S> {
     size_type total_count{0};
     for (size_type i{0}; i < total_size; i += n) {
       // Reset the counter
-      NPU_CHECK(aclrtMemsetAsync(d_count, sizeof(size_type), 0, sizeof(size_type), stream));
+      NPU_CHECK(aclrtMemsetAsync(d_count, sizeof(size_type), 0,
+                                 sizeof(size_type), stream));
 
       // Calculate the batch size for this iteration
       const size_type batch_size = std::min(total_size - i, n);
-      const size_type batch_size_align = ((batch_size + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+      const size_type batch_size_align =
+          ((batch_size + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
 
       if (is_fast_mode()) {
         dump_kernel<K, V, S><<<block_dim_, 64 * 1024, stream>>>(
-            d_table_, table_->buckets, d_keys,
-            d_values, d_scores, i, batch_size, batch_size_align,
-            d_count, value_move_opt_.size, value_move_opt_.cg_size, value_move_opt_.dim);
+            d_table_, table_->buckets, d_keys, d_values, d_scores, i,
+            batch_size, batch_size_align, d_count, value_move_opt_.size,
+            value_move_opt_.cg_size, value_move_opt_.dim);
       } else {
         size_t size_all = n * sizeof(value_type*);
         auto dev_ws{dev_mem_pool_->get_workspace<1>(size_all, stream)};
         auto temp_storage{dev_ws.get<uint8_t*>(0)};
         value_type** d_src_values{reinterpret_cast<value_type**>(temp_storage)};
         dump_kernel_hybrid<K, V, S><<<block_dim_, DYNAMIC_UB_SIZE, stream>>>(
-            d_table_, table_->buckets, d_keys, d_src_values, d_scores, i, batch_size,
-            d_count, table_->dim);
+            d_table_, table_->buckets, d_keys, d_src_values, d_scores, i,
+            batch_size, d_count, table_->dim);
 
         uint64_t valid_ub_size = GetMixedOpUbSize();
         uint32_t max_tile_size =
@@ -3150,9 +3183,10 @@ class HashTable : public HashTableBase<K, V, S> {
           NPU_CHECK(aclrtMemcpyAsync(h_scores, sizeof(score_type) * count,
                                      d_scores, sizeof(score_type) * count,
                                      ACL_MEMCPY_DEVICE_TO_HOST, stream));
-          NPU_CHECK(aclrtMemcpyAsync(h_values, sizeof(value_type) * dim() * count,
-                                     d_values, sizeof(value_type) * dim() * count,
-                                     ACL_MEMCPY_DEVICE_TO_HOST, stream));
+          NPU_CHECK(
+              aclrtMemcpyAsync(h_values, sizeof(value_type) * dim() * count,
+                               d_values, sizeof(value_type) * dim() * count,
+                               ACL_MEMCPY_DEVICE_TO_HOST, stream));
         }
         NPU_CHECK(aclrtSynchronizeStream(stream));
 
@@ -3277,8 +3311,8 @@ class HashTable : public HashTableBase<K, V, S> {
                                 const bool need_lock = true) const {
     std::unique_ptr<read_shared_lock> lock_ptr;
     if (options_.api_lock) {
-      lock_ptr =
-          std::make_unique<read_shared_lock>(mutex_, std::defer_lock, input_stream);
+      lock_ptr = std::make_unique<read_shared_lock>(mutex_, std::defer_lock,
+                                                    input_stream);
       if (need_lock) {
         lock_ptr->lock();
       }
@@ -3355,9 +3389,9 @@ class HashTable : public HashTableBase<K, V, S> {
  private:
   /**
    * @note The function is provided to get the best value move params.
-   * 
+   *
    * @note On `move_byte_per_value`, get best params from the move bytes.
-   * 
+   *
    * @note On `ValueMoveOpt`, size is 8 or 16, which is more suitable for NPUs.
    */
   inline ValueMoveOpt GetValueMoveOpt(uint32_t move_byte_per_value) {
@@ -3365,21 +3399,26 @@ class HashTable : public HashTableBase<K, V, S> {
     opt.size = 1;
     opt.cg_size = 1;
     opt.dim = move_byte_per_value;
-    // based on real data, when move bytes in [128, 4096), we chose 16 as the best size, otherwise, 8 is the best. 
-    uint32_t value_move_size_best = (move_byte_per_value >= 128 && move_byte_per_value < 4096) ? 16 : 8;
+    // based on real data, when move bytes in [128, 4096), we chose 16 as the
+    // best size, otherwise, 8 is the best.
+    uint32_t value_move_size_best =
+        (move_byte_per_value >= 128 && move_byte_per_value < 4096) ? 16 : 8;
     // try to use the best size 8 or 16
     while (opt.dim % 2 == 0 && opt.size < value_move_size_best) {
       opt.size *= 2;
       opt.dim /= 2;
     }
-    // best cg_size for diff dim, group_size can only be one of [1, 2, 4, 8, 16, 32].
-    uint32_t log_value = static_cast<uint32_t>(std::log2(static_cast<double>(opt.dim)));
+    // best cg_size for diff dim, group_size can only be one of [1, 2, 4, 8, 16,
+    // 32].
+    uint32_t log_value =
+        static_cast<uint32_t>(std::log2(static_cast<double>(opt.dim)));
     opt.cg_size <<= log_value;
     // based on real data, cg_size is not necessarily better then it is larger.
     uint32_t value_move_group_size_best = opt.size == 8 ? 32 : 16;
     opt.cg_size = std::min(value_move_group_size_best, opt.cg_size);
     opt.cg_size = std::max(2u, opt.cg_size);
-    // based on real data, when size is large enough, we can get better performance by increasing threads num of cores.
+    // based on real data, when size is large enough, we can get better
+    // performance by increasing threads num of cores.
     opt.is_large_size = move_byte_per_value >= 4096;
 
     return opt;

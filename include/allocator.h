@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include <cstdlib>
 #include <stdlib.h>
+#include <cstdlib>
 #include "debug.h"
 
 namespace npu {
@@ -44,6 +44,9 @@ class BaseAllocator {
   BaseAllocator() = default;
   virtual ~BaseAllocator() = default;
 
+  // Backward-compatible virtual interface (void**). New code should prefer the
+  // templated overloads below, which avoid the `__gm__` address-space qualifier
+  // drop warning when called with a `__gm__ T**`.
   virtual void alloc(const MemoryType type, void** ptr, size_t size,
                      unsigned int pinned_flags = 0) = 0;
 
@@ -54,6 +57,27 @@ class BaseAllocator {
 
   virtual void free_async(const MemoryType type, void* ptr,
                           aclrtStream stream) = 0;
+
+  // Templated wrappers: route through the virtual `void**` interface.
+  // The pointer value is bit-copied from a `void*` to the caller's typed
+  // pointer slot, which avoids an explicit `void*` -> `__gm__ T*` cast
+  // (reinterpret_cast and static_cast are both rejected by the AscendC
+  // compiler for this address-space conversion).
+  template <typename T>
+  void alloc(const MemoryType type, T** ptr, size_t size,
+             unsigned int pinned_flags = 0) {
+    void* tmp = nullptr;
+    alloc(type, &tmp, size, pinned_flags);
+    __builtin_memcpy(ptr, &tmp, sizeof(T*));
+  }
+
+  template <typename T>
+  void alloc_async(const MemoryType type, T** ptr, size_t size,
+                   aclrtStream stream) {
+    void* tmp = nullptr;
+    alloc_async(type, &tmp, size, stream);
+    __builtin_memcpy(ptr, &tmp, sizeof(T*));
+  }
 };
 
 class DefaultAllocator : public virtual BaseAllocator {

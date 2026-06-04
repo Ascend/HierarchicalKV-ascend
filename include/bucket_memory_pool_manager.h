@@ -17,11 +17,11 @@
 
 #pragma once
 
+#include <acl/acl.h>
 #include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <acl/acl.h>
 #include "allocator.h"
 #include "hashtable_options.h"
 #include "table.h"
@@ -34,10 +34,10 @@ constexpr size_t CACHE_LINE_SIZE = 128U / sizeof(uint8_t);
 constexpr size_t BUCKET_ALIGN_SIZE = 512;
 
 /**
- * @brief Manages bucket memory: either a single pre-allocated pool (when enabled)
- * or per-block allocations via allocator. Implements IBucketAddressProvider so
- * that create_table / initialize_buckets / double_capacity use it for all
- * bucket address and size queries.
+ * @brief Manages bucket memory: either a single pre-allocated pool (when
+ * enabled) or per-block allocations via allocator. Implements
+ * IBucketAddressProvider so that create_table / initialize_buckets /
+ * double_capacity use it for all bucket address and size queries.
  */
 template <class K, class V, class S>
 class BucketMemoryPoolManager : public IBucketAddressProvider {
@@ -105,7 +105,7 @@ class BucketMemoryPoolManager : public IBucketAddressProvider {
         size_t num_of_buckets =
             std::min(end - i, static_cast<size_t>(num_of_buckets_per_alloc));
         uint8_t* address = nullptr;
-        allocator->alloc(MemoryType::Device, reinterpret_cast<void**>(&address),
+        allocator->alloc(MemoryType::Device, &address,
                          bucket_memory_size * num_of_buckets);
         block_bases_.push_back(address);
       }

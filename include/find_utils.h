@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <simt_api/device_sync_functions.h>
 #include "types.h"
 
 namespace npu {
@@ -29,11 +30,8 @@ namespace hkv {
 
 template <class K, class V, class S>
 __forceinline__ __simt_callee__ OccupyResult find_without_lock(
-    __gm__ Bucket<K, V, S>* __restrict__ bucket,
-    const K desired_key,
-    uint32_t key_pos,
-    const VecD_Comp target_digests,
-    uint32_t& target_pos,
+    __gm__ Bucket<K, V, S>* __restrict__ bucket, const K desired_key,
+    uint32_t key_pos, const VecD_Comp target_digests, uint32_t& target_pos,
     const uint32_t bucket_capacity) {
   using BUCKET = Bucket<K, V, S>;
   constexpr uint32_t STRIDE = sizeof(VecD_Comp) / sizeof(D);
@@ -88,17 +86,16 @@ __forceinline__ __simt_callee__ OccupyResult find_without_lock(
 }
 
 /*
- * find_and_lock: TILE_SIZE threads cooperate to find/lock a position in bucket. Only support TILE_SIZE = 32.
- * Combines find-key, find-empty, and eviction into one unified interface.
- * After return, key_pos holds the locked position and evicted_key holds the
- * original key at that position (meaningful for EVICT).
+ * find_and_lock: TILE_SIZE threads cooperate to find/lock a position in bucket.
+ * Only support TILE_SIZE = 32. Combines find-key, find-empty, and eviction into
+ * one unified interface. After return, key_pos holds the locked position and
+ * evicted_key holds the original key at that position (meaningful for EVICT).
  */
 template <typename K, typename S, int32_t TILE_SIZE = 32>
-__forceinline__ __simt_callee__ OccupyResult find_and_lock(
-    __gm__ K* bucket_keys, __gm__ S* bucket_scores,
-    const uint32_t bucket_max_size, const K& key, const S& score,
-    uint32_t& key_pos, K& evicted_key, const uint32_t lane_id) {
-
+__forceinline__ __simt_callee__ OccupyResult
+find_and_lock(__gm__ K* bucket_keys, __gm__ S* bucket_scores,
+              const uint32_t bucket_max_size, const K& key, const S& score,
+              uint32_t& key_pos, K& evicted_key, const uint32_t lane_id) {
   const uint32_t start_pos = key_pos;
 
   // Phase 1: Find existing key or empty slot
@@ -111,8 +108,8 @@ __forceinline__ __simt_callee__ OccupyResult find_and_lock(
     K expected_key;
     uint32_t vote;
     do {
-      expected_key = asc_atomic_cas(
-          bucket_keys + current_pos, key, static_cast<K>(LOCKED_KEY));
+      expected_key = asc_atomic_cas(bucket_keys + current_pos, key,
+                                    static_cast<K>(LOCKED_KEY));
       bool locked = (expected_key == key);
 
       vote = asc_ballot(locked);
@@ -122,13 +119,11 @@ __forceinline__ __simt_callee__ OccupyResult find_and_lock(
         return OccupyResult::DUPLICATE;
       }
 
-      vote = asc_ballot(
-          expected_key == static_cast<K>(LOCKED_KEY));
+      vote = asc_ballot(expected_key == static_cast<K>(LOCKED_KEY));
       if (vote) {
         continue;
       }
-      vote = asc_ballot(
-          expected_key == static_cast<K>(EMPTY_KEY));
+      vote = asc_ballot(expected_key == static_cast<K>(EMPTY_KEY));
       if (vote) {
         break;
       }
@@ -139,18 +134,16 @@ __forceinline__ __simt_callee__ OccupyResult find_and_lock(
       int32_t src_lane = __ffs(static_cast<int32_t>(vote)) - 1;
       K cas_expected = static_cast<K>(EMPTY_KEY);
       if (static_cast<int32_t>(lane_id) == src_lane) {
-        cas_expected = asc_atomic_cas(
-            bucket_keys + current_pos,
-            static_cast<K>(EMPTY_KEY),
-            static_cast<K>(LOCKED_KEY));
+        cas_expected =
+            asc_atomic_cas(bucket_keys + current_pos, static_cast<K>(EMPTY_KEY),
+                           static_cast<K>(LOCKED_KEY));
       }
       cas_expected = asc_shfl(cas_expected, src_lane, TILE_SIZE);
       if (cas_expected == static_cast<K>(EMPTY_KEY)) {
         key_pos = asc_shfl(current_pos, src_lane, TILE_SIZE);
         return OccupyResult::OCCUPIED_EMPTY;
       }
-      if (cas_expected == key ||
-          cas_expected == static_cast<K>(LOCKED_KEY)) {
+      if (cas_expected == key || cas_expected == static_cast<K>(LOCKED_KEY)) {
         return OccupyResult::CONTINUE;
       }
       vote -= (static_cast<uint32_t>(1) << src_lane);
@@ -173,11 +166,9 @@ __forceinline__ __simt_callee__ OccupyResult find_and_lock(
               L1CacheType::NON_CACHEABLE>(bucket_scores + current_pos);
     if (temp_score < local_min_score) {
       K current_key;
-      while ((current_key =
-                  __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
-                        L1CacheType::NON_CACHEABLE>(
-                      bucket_keys + current_pos)) ==
-             static_cast<K>(LOCKED_KEY)) {
+      while ((current_key = __ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
+                                  L1CacheType::NON_CACHEABLE>(
+                  bucket_keys + current_pos)) == static_cast<K>(LOCKED_KEY)) {
         asc_threadfence();
       }
       if (current_key != static_cast<K>(EMPTY_KEY)) {
@@ -209,18 +200,16 @@ __forceinline__ __simt_callee__ OccupyResult find_and_lock(
     bool result = false;
     if (static_cast<int32_t>(lane_id) == src_lane) {
       evicted_key = local_min_key;
-      auto try_key = asc_atomic_cas(bucket_keys + local_min_pos,
-                                     local_min_key,
-                                     static_cast<K>(LOCKED_KEY));
+      auto try_key = asc_atomic_cas(bucket_keys + local_min_pos, local_min_key,
+                                    static_cast<K>(LOCKED_KEY));
       if (try_key == local_min_key) {
         if (__ldg<LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV,
-                  L1CacheType::NON_CACHEABLE>(
-                bucket_scores + local_min_pos) <= global_min_score) {
+                  L1CacheType::NON_CACHEABLE>(bucket_scores + local_min_pos) <=
+            global_min_score) {
           key_pos = local_min_pos;
           result = true;
         } else {
-          (void)asc_atomic_exch(
-              bucket_keys + local_min_pos, local_min_key);
+          (void)asc_atomic_exch(bucket_keys + local_min_pos, local_min_key);
         }
       }
     }

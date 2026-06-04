@@ -16,8 +16,21 @@
 
 #pragma once
 
+/*
+ * 底层bisheng编译器定义的__GNUC__为4，会出现重复ACL_DEPRECATED相关宏定义
+ * 暂时在此处忽略-Wmacro-redefined，避免编译告警
+ */
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmacro-redefined"
+#endif
+
 #include <acl/acl.h>
 #include <aclnn/aclnn_base.h>
+
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -246,32 +259,31 @@ class WorkspaceDeleter {
 };
 
 class ScopedStream {
-  public:
-    explicit ScopedStream(aclrtStream external_stream) : stream_(external_stream), owned_(false) {
-      if (stream_ == nullptr) {
-        auto ret = aclrtCreateStream(&stream_);
-        NPU_CHECK(ret);
-        owned_ = true;
-      }
+ public:
+  explicit ScopedStream(aclrtStream external_stream)
+      : stream_(external_stream), owned_(false) {
+    if (stream_ == nullptr) {
+      auto ret = aclrtCreateStream(&stream_);
+      NPU_CHECK(ret);
+      owned_ = true;
     }
- 
-    ~ScopedStream() {
-      if (owned_ && stream_ != nullptr) {
-        auto ret = aclrtDestroyStream(stream_);
-        NPU_CHECK(ret);
-      }
+  }
+
+  ~ScopedStream() {
+    if (owned_ && stream_ != nullptr) {
+      auto ret = aclrtDestroyStream(stream_);
+      NPU_CHECK(ret);
     }
- 
-    ScopedStream(const ScopedStream&) = delete;
-    ScopedStream& operator=(const ScopedStream&) = delete;
-  
-    aclrtStream get() const {
-      return stream_;
-    }
- 
-  private:
-    aclrtStream stream_;
-    bool owned_;
+  }
+
+  ScopedStream(const ScopedStream&) = delete;
+  ScopedStream& operator=(const ScopedStream&) = delete;
+
+  aclrtStream get() const { return stream_; }
+
+ private:
+  aclrtStream stream_;
+  bool owned_;
 };
 
 #define GET_WORKSPACE_SIZE_FUNC(aclnn_api) aclnn_api##GetWorkspaceSize

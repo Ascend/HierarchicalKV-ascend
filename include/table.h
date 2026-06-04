@@ -17,18 +17,18 @@
 
 #pragma once
 
+#include <acl/acl.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <vector>
-#include <acl/acl.h>
-#include "kernels/init_table_kernel/init_table_kernel.h"
 #include "allocator.h"
 #include "debug.h"
-#include "utils.h"
+#include "kernels/init_table_kernel/init_table_kernel.h"
 #include "types.h"
+#include "utils.h"
 
 namespace npu {
 namespace hkv {
@@ -56,8 +56,7 @@ void realloc(P* ptr, size_t old_size, size_t new_size,
   old_size = std::min(old_size, new_size);
 
   __gm__ char* new_ptr = nullptr;
-  allocator->alloc(MemoryType::Device, reinterpret_cast<void**>(&new_ptr),
-                   new_size);
+  allocator->alloc(MemoryType::Device, &new_ptr, new_size);
   if (*ptr != nullptr) {
     NPU_CHECK(aclrtMemcpy(new_ptr, new_size, *ptr, old_size,
                           ACL_MEMCPY_DEVICE_TO_DEVICE));
@@ -79,7 +78,7 @@ void realloc_host(P* ptr, size_t old_size, size_t new_size,
 
   // Alloc new buffer and copy at old data.
   char* new_ptr = nullptr;
-  allocator->alloc(MemoryType::Host, (void**)&new_ptr, new_size);
+  allocator->alloc(MemoryType::Host, &new_ptr, new_size);
 
   if (*ptr != nullptr) {
     std::memcpy(new_ptr, *ptr, old_size);
@@ -139,8 +138,7 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
    * strategy to allocate some memory slices whose size is not greater than
    * 64GB, and put the buckets pointer point to the slices.
    */
-  HKV_CHECK(start < end,
-               "initialize_buckets, start should be less than end!");
+  HKV_CHECK(start < end, "initialize_buckets, start should be less than end!");
   size_t buckets_num = end - start;
   const size_t total_size_of_vectors =
       buckets_num * (*table)->bucket_max_size * sizeof(V) * (*table)->dim;
@@ -169,14 +167,14 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
       if (!(*table)->is_pure_hbm) {
         mixed_hbm = true;
       }
-      allocator->alloc(MemoryType::Device, (void**)&((*table)->slices[i]),
+      allocator->alloc(MemoryType::Device, &((*table)->slices[i]),
                        slice_real_size);
       (*table)->remaining_hbm_for_vectors -= slice_real_size;
     } else {
       (*table)->is_pure_hbm = false;
       const size_t host_min_size = MB(2);
       slice_real_size = std::max(host_min_size, slice_real_size);
-      allocator->alloc(MemoryType::Pinned, (void**)&((*table)->slices[i]),
+      allocator->alloc(MemoryType::Pinned, &((*table)->slices[i]),
                        slice_real_size);
       // 申请的host内存地址和映射后的地址相同，因此使用host地址即可
       void* stub_ptr = nullptr;
@@ -203,14 +201,13 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
       bucket_max_size < CACHE_LINE_SIZE ? CACHE_LINE_SIZE : bucket_max_size;
 
   size_t actual_bucket_memory_size = 0;
-  provider->ensure_buckets_for_range(start, end,
-                                      (*table)->num_of_buckets_per_alloc,
-                                      allocator);
+  provider->ensure_buckets_for_range(
+      start, end, (*table)->num_of_buckets_per_alloc, allocator);
   actual_bucket_memory_size = provider->get_bucket_memory_size();
 
   HKV_CHECK(start % (*table)->num_of_buckets_per_alloc == 0,
-               "initialize_buckets, start must be times of "
-               "num_of_buckets_per_alloc!");
+            "initialize_buckets, start must be times of "
+            "num_of_buckets_per_alloc!");
   /* NOTICE: Only the buckets which index is the times of
    * `num_of_buckets_per_alloc` will allocate a real address, that provides the
    * callers a method to avoid memory fragmentation.
@@ -222,8 +219,9 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
 
     address = provider->get_bucket_address(i);
 
-    allocate_bucket_others_kernel<K, V, S><<<1, 0, 0>>>((*table)->buckets,
-      actual_bucket_memory_size, num_of_buckets, i, address, reserve_size, bucket_max_size);
+    allocate_bucket_others_kernel<K, V, S><<<1, 0, 0>>>(
+        (*table)->buckets, actual_bucket_memory_size, num_of_buckets, i,
+        address, reserve_size, bucket_max_size);
   }
   NPU_CHECK(aclrtSynchronizeDevice());
 
@@ -231,13 +229,13 @@ void initialize_buckets(Table<K, V, S>** table, BaseAllocator* allocator,
     const size_t block_size = 512;
     const size_t N = end - start + 1;
     const int grid_size = SAFE_GET_GRID_SIZE(N, block_size);
-    create_atomic_keys_kernel<K, V, S><<<grid_size, 0, 0>>>((*table)->buckets,
-      start, end, (*table)->bucket_max_size);
+    create_atomic_keys_kernel<K, V, S><<<grid_size, 0, 0>>>(
+        (*table)->buckets, start, end, (*table)->bucket_max_size);
   }
 
   {
-    create_atomic_scores_kernel<K, V, S><<<block_dim, 0, 0>>>((*table)->buckets,
-      start, end, (*table)->bucket_max_size);
+    create_atomic_scores_kernel<K, V, S><<<block_dim, 0, 0>>>(
+        (*table)->buckets, start, end, (*table)->bucket_max_size);
   }
   NPU_CHECK(aclrtSynchronizeDevice());
   NpuCheckError();
@@ -280,15 +278,15 @@ size_t get_slice_size(Table<K, V, S>** table) {
 */
 template <class K, class V, class S>
 void create_table(Table<K, V, S>** table, BaseAllocator* allocator,
-                  const uint32_t block_dim,
-                  const size_t dim, const size_t init_size = 134217728,
+                  const uint32_t block_dim, const size_t dim,
+                  const size_t init_size = 134217728,
                   const size_t max_size = std::numeric_limits<size_t>::max(),
                   const size_t max_hbm_for_vectors = 0,
                   const size_t bucket_max_size = 128,
                   const size_t num_of_buckets_per_alloc = 1,
                   const size_t tile_size = 32, const bool primary = true,
                   IBucketAddressProvider* provider = nullptr) {
-  allocator->alloc(MemoryType::Host, (void**)table, sizeof(Table<K, V, S>));
+  allocator->alloc(MemoryType::Host, table, sizeof(Table<K, V, S>));
   (void)std::memset(reinterpret_cast<void*>(*table), 0, sizeof(Table<K, V, S>));
   (*table)->dim = dim;
   (*table)->bucket_max_size = bucket_max_size;
@@ -316,18 +314,20 @@ void create_table(Table<K, V, S>** table, BaseAllocator* allocator,
   (*table)->primary = primary;
   precomputation_for_kernel_div(**table);
 
-  allocator->alloc(MemoryType::Device, (void**)&((*table)->buckets_size),
+  allocator->alloc(MemoryType::Device, &((*table)->buckets_size),
                    (*table)->buckets_num * sizeof(int));
-  NPU_CHECK(aclrtMemset((*table)->buckets_size, (*table)->buckets_num * sizeof(int), 0,
+  NPU_CHECK(aclrtMemset((*table)->buckets_size,
+                        (*table)->buckets_num * sizeof(int), 0,
                         (*table)->buckets_num * sizeof(int)));
 
-  allocator->alloc(MemoryType::Device, (void**)&((*table)->buckets),
+  allocator->alloc(MemoryType::Device, &((*table)->buckets),
                    (*table)->buckets_num * sizeof(Bucket<K, V, S>));
-  NPU_CHECK(aclrtMemset((*table)->buckets, (*table)->buckets_num * sizeof(Bucket<K, V, S>), 0,
+  NPU_CHECK(aclrtMemset((*table)->buckets,
+                        (*table)->buckets_num * sizeof(Bucket<K, V, S>), 0,
                         (*table)->buckets_num * sizeof(Bucket<K, V, S>)));
 
-  initialize_buckets<K, V, S>(table, allocator, 0, (*table)->buckets_num, block_dim,
-                              provider);
+  initialize_buckets<K, V, S>(table, allocator, 0, (*table)->buckets_num,
+                              block_dim, provider);
   NpuCheckError();
 }
 
@@ -335,8 +335,9 @@ void create_table(Table<K, V, S>** table, BaseAllocator* allocator,
 template <class K, class V, class S>
 void destroy_table(Table<K, V, S>** table, BaseAllocator* allocator,
                    bool use_memory_pool = false) {
-  // Bucket memory is always managed by IBucketAddressProvider (e.g. BucketMemoryPoolManager);
-  // skip individual bucket freeing here in both pool and non-pool cases.
+  // Bucket memory is always managed by IBucketAddressProvider (e.g.
+  // BucketMemoryPoolManager); skip individual bucket freeing here in both pool
+  // and non-pool cases.
   (void)use_memory_pool;
 
   for (size_t i = 0; i < (*table)->num_of_memory_slices; i++) {
@@ -367,8 +368,7 @@ void double_capacity(Table<K, V, S>** table, BaseAllocator* allocator,
           (*table)->buckets_num * sizeof(Bucket<K, V, S>) * 2, allocator);
 
   initialize_buckets(table, allocator, (*table)->buckets_num,
-                     (*table)->buckets_num * 2, block_dim,
-                     provider);
+                     (*table)->buckets_num * 2, block_dim, provider);
 
   (*table)->capacity *= 2;
   (*table)->buckets_num *= 2;

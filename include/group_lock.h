@@ -24,8 +24,8 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include "kernels/utils_kernel/group_lock_kernel.h"
 #include "debug.h"
+#include "kernels/utils_kernel/group_lock_kernel.h"
 
 namespace npu {
 namespace hkv {
@@ -48,31 +48,43 @@ class group_shared_mutex {
   group_shared_mutex& operator=(const group_shared_mutex&) = delete;
 
   group_shared_mutex() noexcept
-      : h_update_count_(0), h_read_count_(0), h_unique_flag_(false) {
-    // Allocate device memory for counters
+      : h_update_count_(0),
+        h_read_count_(0),
+        h_unique_flag_(false),
+        d_update_count_(nullptr),
+        d_read_count_(nullptr),
+        d_unique_flag_(nullptr) {}
+
+  ~group_shared_mutex() noexcept {
+    if (d_update_count_) {
+      NPU_CHECK(aclrtSynchronizeDevice());
+      aclrtFree(d_update_count_);
+      aclrtFree(d_read_count_);
+      aclrtFree(d_unique_flag_);
+    }
+  }
+
+  /**
+   * @brief Allocate device memory for counters and initialize them.
+   *
+   * @note Must be called after `aclrtSetDevice` so that the device context is
+   * valid when `aclrtMalloc` is invoked. Idempotent: safe to call multiple
+   * times; subsequent calls are no-ops if device memory has already been
+   * allocated.
+   */
+  void init() noexcept {
+    if (d_update_count_ != nullptr) {
+      return;
+    }
     NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_update_count_),
                           sizeof(int32_t), ACL_MEM_MALLOC_NORMAL_ONLY));
     NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_read_count_),
                           sizeof(int32_t), ACL_MEM_MALLOC_NORMAL_ONLY));
     NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_unique_flag_),
                           sizeof(int32_t), ACL_MEM_MALLOC_NORMAL_ONLY));
-    // Initialize device counters
     group_lock::init_kernel<int32_t>
         <<<1, 0, 0>>>(d_update_count_, d_read_count_, d_unique_flag_);
     NPU_CHECK(aclrtSynchronizeDevice());
-  }
-
-  ~group_shared_mutex() noexcept {
-    NPU_CHECK(aclrtSynchronizeDevice());
-    if (d_update_count_) {
-      aclrtFree(d_update_count_);
-    }
-    if (d_read_count_) {
-      aclrtFree(d_read_count_);
-    }
-    if (d_unique_flag_) {
-      aclrtFree(d_unique_flag_);
-    }
   }
 
   /**

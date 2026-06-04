@@ -212,7 +212,7 @@ void run_export_test(const ExportTestConfig& config) {
       vector<V> vec(DIM);
       copy(host_values.begin() + i * DIM, host_values.begin() + (i + 1) * DIM,
            vec.begin());
-      reference_map[host_keys[i]] = move(vec);
+      reference_map[host_keys[i]] = std::move(vec);
     }
 
     // 验证每个导出的键值对都存在于参考map中且值正确
@@ -418,7 +418,7 @@ void run_export_hybrid_test(const ExportTestConfig& config) {
       vector<V> vec(DIM);
       copy(host_values.begin() + i * DIM, host_values.begin() + (i + 1) * DIM,
            vec.begin());
-      reference_map[host_keys[i]] = move(vec);
+      reference_map[host_keys[i]] = std::move(vec);
     }
 
     // 验证每个导出的键值对都存在于参考map中且值正确

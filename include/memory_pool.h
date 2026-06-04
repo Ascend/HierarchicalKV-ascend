@@ -78,7 +78,7 @@ struct StandardAllocator final : AllocatorBase<T, StandardAllocator<T>> {
   inline static type* alloc(size_t n, BaseAllocator* allocator,
                             aclrtStream stream = 0) {
     type* ptr;
-    allocator->alloc(MemoryType::Host, (void**)&ptr, n * sizeof(T));
+    allocator->alloc(MemoryType::Host, &ptr, n * sizeof(T));
     return ptr;
   }
 
@@ -99,9 +99,9 @@ struct HostAllocator final : AllocatorBase<T, HostAllocator<T>> {
 
   inline static type* alloc(size_t n, BaseAllocator* allocator,
                             aclrtStream stream = 0) {
-    void* ptr;
-    allocator->alloc(MemoryType::Pinned, (void**)&ptr, n * sizeof(T));
-    return reinterpret_cast<type*>(ptr);
+    type* ptr;
+    allocator->alloc(MemoryType::Pinned, &ptr, n * sizeof(T));
+    return ptr;
   }
 
   inline static void free(type* ptr, BaseAllocator* allocator,
@@ -122,11 +122,10 @@ struct DeviceAllocator final : AllocatorBase<T, DeviceAllocator<T>> {
 
   inline static type* alloc(size_t n, BaseAllocator* allocator,
                             aclrtStream stream = 0) {
-    void* ptr;
+    type* ptr;
 
-    allocator->alloc_async(MemoryType::Device, (void**)&ptr, n * sizeof(T),
-                           stream);
-    return reinterpret_cast<type*>(ptr);
+    allocator->alloc_async(MemoryType::Device, &ptr, n * sizeof(T), stream);
+    return ptr;
   }
 
   inline static void free(type* ptr, BaseAllocator* allocator,
@@ -439,7 +438,9 @@ class MemoryPool final {
  private:
   inline void collect_pending_unsafe(aclrtStream stream) {
     auto it{std::remove_if(
-        pending_.begin(), pending_.end(), [this, stream](const std::tuple<alloc_type*, size_t, aclrtEvent>& pending) {
+        pending_.begin(), pending_.end(),
+        [this,
+         stream](const std::tuple<alloc_type*, size_t, aclrtEvent>& pending) {
           aclrtEventRecordedStatus state;
           NPU_CHECK(aclrtQueryEventStatus(std::get<2>(pending), &state));
           switch (state) {
