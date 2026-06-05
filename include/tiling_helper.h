@@ -60,24 +60,56 @@ static uint64_t GetMixedOpUbSize() {
   return valid_ub_size;
 }
 
-static inline ValueMoveTiling GetValueMoveTiling(uint64_t n, uint32_t block_dim,
-                                                 uint32_t dim,
-                                                 uint32_t element_size,
-                                                 bool is_pure_simd, uint32_t buffer_num = DOUBLE_BUFFER) {
+static inline ValueMoveTiling GetValueMoveTiling(
+    uint64_t n, uint32_t block_dim, uint32_t dim, uint32_t element_size,
+    bool is_pure_simd, uint32_t buffer_num = DOUBLE_BUFFER) {
   ValueMoveTiling tiling;
   tiling.tail_core_move_num = n / block_dim;
   tiling.former_core_move_num = tiling.tail_core_move_num + 1;
   tiling.former_num = n - tiling.tail_core_move_num * block_dim;
   tiling.valid_ub_size = is_pure_simd ? GetTotalUbSize() : GetMixedOpUbSize();
 
-  uint32_t max_tile_size =
-      tiling.valid_ub_size / (buffer_num * element_size);
+  uint32_t max_tile_size = tiling.valid_ub_size / (buffer_num * element_size);
   HKV_CHECK(max_tile_size != 0,
             log_format("UB size %lu is too small.", tiling.valid_ub_size));
   tiling.tile_size = (dim <= max_tile_size) ? dim : max_tile_size;
   tiling.num_tiles = (dim + tiling.tile_size - 1) / tiling.tile_size;
 
   return tiling;
+}
+
+static inline ValueMoveTiling GetHalfUBValueMoveTiling(
+    uint64_t n, uint32_t block_dim, uint32_t dim, uint32_t element_size,
+    bool is_pure_simd, uint32_t buffer_num = DOUBLE_BUFFER) {
+  ValueMoveTiling tiling;
+  tiling.tail_core_move_num = n / block_dim;
+  tiling.former_core_move_num = tiling.tail_core_move_num + 1;
+  tiling.former_num = n - tiling.tail_core_move_num * block_dim;
+  tiling.valid_ub_size = is_pure_simd ? GetTotalUbSize() : GetMixedOpUbSize();
+  tiling.num_tiles = tiling.valid_ub_size / (buffer_num * element_size * dim);
+
+  return tiling;
+}
+
+static inline bool UseHalfUbWriteKernel(uint32_t dim, uint32_t element_size,
+                                        bool is_pure_simd,
+                                        uint32_t buffer_num = DOUBLE_BUFFER) {
+  constexpr uint32_t MAX_VALID_TENSOR_SIZE =
+      256;  // 受限PCIE方案的host读取带宽，实测256B以下能获取较好性能
+  uint32_t tensor_size = dim * element_size;
+  if (tensor_size > MAX_VALID_TENSOR_SIZE) {
+    return false;
+  }
+
+  constexpr uint32_t ALIGN_NUM = 32;  // ub地址对齐32字节
+  bool is_align = (tensor_size % ALIGN_NUM == 0);
+  if (!is_align) {
+    return false;
+  }
+
+  uint64_t ub_size = is_pure_simd ? GetTotalUbSize() : GetMixedOpUbSize();
+  return (ub_size >=
+          (tensor_size * buffer_num * 2));  // 至少开启2倍，否则没有意义
 }
 
 }  // namespace hkv

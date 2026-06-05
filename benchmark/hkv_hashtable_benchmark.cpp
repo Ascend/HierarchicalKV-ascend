@@ -29,7 +29,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "acl/acl.h"
+// clang-format off
 #include "hkv_hashtable.h"
+// clang-format on
 #include "benchmark_util.h"
 #include "debug.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -175,10 +177,10 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
         std::min(static_cast<int64_t>(key_num_per_op), key_num_append);
     create_continuous_keys<K, S>(h_keys, h_scores, key_num_append, start);
     NPU_CHECK(aclrtMemcpy(d_keys, key_num_append * sizeof(K), h_keys,
-    key_num_append * sizeof(K),
+                          key_num_append * sizeof(K),
                           ACL_MEMCPY_HOST_TO_DEVICE));
-    NPU_CHECK(aclrtMemcpy(d_scores_real, key_num_append * sizeof(S),
-    h_scores, key_num_append * sizeof(S),
+    NPU_CHECK(aclrtMemcpy(d_scores_real, key_num_append * sizeof(S), h_scores,
+                          key_num_append * sizeof(S),
                           ACL_MEMCPY_HOST_TO_DEVICE));
     table->insert_or_assign(key_num_append, d_keys, d_vectors, d_scores,
                             stream);
@@ -237,7 +239,8 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
         //                      key_num_per_op_warmup, stream);
 
         NPU_CHECK(aclrtSynchronizeStream(stream));
-        table->find(key_num_per_op_warmup, d_keys, d_vectors_ptr, d_found, d_scores, stream);
+        table->find(key_num_per_op_warmup, d_keys, d_vectors_ptr, d_found,
+                    d_scores, stream);
         NPU_CHECK(aclrtSynchronizeStream(stream));
         // benchmark::read_from_ptr(d_vectors_ptr, d_vectors, dim,
         //                          key_num_per_op_warmup, stream);
@@ -300,12 +303,15 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
       case API_Select::find_and_update: {
         V** d_vectors_ptr = nullptr;
         bool* d_found = nullptr;
-        NPU_CHECK(aclrtMalloc((void**)&d_vectors_ptr, key_num_per_op_warmup * sizeof(V*),
+        NPU_CHECK(aclrtMalloc((void**)&d_vectors_ptr,
+                              key_num_per_op_warmup * sizeof(V*),
                               ACL_MEM_MALLOC_HUGE_FIRST));
-        NPU_CHECK(aclrtMalloc((void**)&d_found, key_num_per_op_warmup * sizeof(bool),
+        NPU_CHECK(aclrtMalloc((void**)&d_found,
+                              key_num_per_op_warmup * sizeof(bool),
                               ACL_MEM_MALLOC_HUGE_FIRST));
         NPU_CHECK(aclrtSynchronizeStream(stream));
-        table->find_and_update(key_num_per_op_warmup, d_keys, d_vectors_ptr, d_found, d_scores, stream);
+        table->find_and_update(key_num_per_op_warmup, d_keys, d_vectors_ptr,
+                               d_found, d_scores, stream);
         NPU_CHECK(aclrtSynchronizeStream(stream));
         NPU_CHECK(aclrtFree(d_vectors_ptr));
         NPU_CHECK(aclrtFree(d_found));
@@ -323,15 +329,15 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
       }
       case API_Select::export_batch_if_v2: {
         size_t* d_dump_counter = nullptr;
-        NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_dump_counter), sizeof(size_t),
-                              ACL_MEM_MALLOC_HUGE_FIRST));
+        NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_dump_counter),
+                              sizeof(size_t), ACL_MEM_MALLOC_HUGE_FIRST));
         NPU_CHECK(
             aclrtMemset(d_dump_counter, sizeof(size_t), 0, sizeof(size_t)));
         K pattern = 0;
         ExportIfPredFunctorV2<K, V, S> pred(pattern, threshold);
         table->template export_batch_if_v2<ExportIfPredFunctorV2<K, V, S>>(
-            pred, key_num_per_op_warmup, 0, d_dump_counter,
-            d_keys, d_vectors, d_scores, stream);
+            pred, key_num_per_op_warmup, 0, d_dump_counter, d_keys, d_vectors,
+            d_scores, stream);
         NPU_CHECK(aclrtSynchronizeStream(stream));
         NPU_CHECK(aclrtFree(d_dump_counter));
         break;
@@ -462,9 +468,8 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
       timer.start();
       K pattern = 0;
       table->template export_batch_if<ExportIfPredFunctor>(
-          pattern, threshold, key_num_per_op / target_load_factor *
-          safe_ratio, 0, d_dump_counter, d_keys, d_vectors, d_scores,
-          stream);
+          pattern, threshold, key_num_per_op / target_load_factor * safe_ratio,
+          0, d_dump_counter, d_keys, d_vectors, d_scores, stream);
       NPU_CHECK(aclrtSynchronizeStream(stream));
       timer.end();
       NPU_CHECK(aclrtFree(d_dump_counter));
@@ -484,13 +489,12 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
                             ACL_MEM_MALLOC_HUGE_FIRST));
       NPU_CHECK(aclrtMalloc((void**)&d_found, key_num_per_op * sizeof(bool),
                             ACL_MEM_MALLOC_HUGE_FIRST));
-      // benchmark::array2ptr(d_vectors_ptr, d_vectors, dim, key_num_per_op, stream);
       NPU_CHECK(aclrtSynchronizeStream(stream));
       timer.start();
-      table->find_and_update(key_num_per_op, d_keys, d_vectors_ptr, d_found, d_scores, stream);
+      table->find_and_update(key_num_per_op, d_keys, d_vectors_ptr, d_found,
+                             d_scores, stream);
       NPU_CHECK(aclrtSynchronizeStream(stream));
       timer.end();
-      // benchmark::read_from_ptr(d_vectors_ptr, d_vectors, dim, key_num_per_op, stream);
       NPU_CHECK(aclrtSynchronizeStream(stream));
       NPU_CHECK(aclrtFree(d_vectors_ptr));
       NPU_CHECK(aclrtFree(d_found));
@@ -517,16 +521,15 @@ float test_one_api(std::shared_ptr<Table>& table, const API_Select api,
       // It's normal to happen `illegal memory access` error occasionally.
       float safe_ratio = 0.995;
 
-      NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_dump_counter), sizeof(size_t),
-                            ACL_MEM_MALLOC_HUGE_FIRST));
+      NPU_CHECK(aclrtMalloc(reinterpret_cast<void**>(&d_dump_counter),
+                            sizeof(size_t), ACL_MEM_MALLOC_HUGE_FIRST));
       NPU_CHECK(aclrtMemset(d_dump_counter, sizeof(size_t), 0, sizeof(size_t)));
       K pattern = 0;
       ExportIfPredFunctorV2<K, V, S> pred(pattern, threshold);
       timer.start();
       table->template export_batch_if_v2<ExportIfPredFunctorV2<K, V, S>>(
-          pred, key_num_per_op / target_load_factor * safe_ratio,
-          0, d_dump_counter, d_keys, d_vectors, d_scores,
-          stream);
+          pred, key_num_per_op / target_load_factor * safe_ratio, 0,
+          d_dump_counter, d_keys, d_vectors, d_scores, stream);
       NPU_CHECK(aclrtSynchronizeStream(stream));
       timer.end();
       NPU_CHECK(aclrtFree(d_dump_counter));
@@ -585,7 +588,7 @@ void print_title_a() {
        //<< "| insert_or_assign "
        << "|-----------------:"
        //<< "|   find "
- 	     << "|-------:"
+       << "|--------:"
        //<< "| find_or_insert* "
        << "|----------------:"
        //  << "| find_and_update "
@@ -604,7 +607,7 @@ void print_title_a() {
     //<< "| insert_and_evict "
     cout << "|-----------------:";
   }
-       //<< "|  contains "
+  //<< "|  contains "
   cout << "|----------:";
   cout << "|\n";
 }
@@ -643,7 +646,7 @@ void print_title_hybrid_a() {
        //<< "| insert_or_assign "
        << "|-----------------:"
        //<< "|   find "
-       << "|-------:"
+       << "|--------:"
        //<< "| find_or_insert "
        << "|---------------:"
        //<< "| assign "
@@ -716,7 +719,8 @@ void test_main(std::vector<API_Select>& apis, const size_t dim,
       std::cout << "|";
       switch (api) {
         case API_Select::insert_or_assign: {
-          // 空格数量为：列宽长度-7，如insert_or_assign的列宽长度为: insert_or_assign ,共18个字符，
+          // 空格数量为：列宽长度-7，如insert_or_assign的列宽长度为:
+          // insert_or_assign ,共18个字符，
           // 所以空格数量为18-7=11，具体列宽长度见print_title_a()
           std::cout << rep(11);
           break;
@@ -818,22 +822,22 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
   try {
     {
       std::vector<API_Select> apis_a{
-        API_Select::insert_or_assign,
-        API_Select::find,
-        API_Select::find_or_insert_ptr,
-        API_Select::find_and_update,
-        API_Select::find_ptr,
-        API_Select::find_or_insert,
-        API_Select::assign,
-        API_Select::assign_scores,
-        API_Select::assign_values,
-        API_Select::insert_and_evict,
-        API_Select::contains,
+          API_Select::insert_or_assign,
+          API_Select::find,
+          API_Select::find_or_insert_ptr,
+          API_Select::find_and_update,
+          API_Select::find_ptr,
+          API_Select::find_or_insert,
+          API_Select::assign,
+          API_Select::assign_scores,
+          API_Select::assign_values,
+          API_Select::insert_and_evict,
+          API_Select::contains,
       };
       std::vector<API_Select> apis_b{
-        API_Select::export_batch,
-        API_Select::export_batch_if_v2,
-        API_Select::export_batch_if,
+          API_Select::export_batch,
+          API_Select::export_batch_if_v2,
+          API_Select::export_batch_if,
       };
       test_mode = Test_Mode::pure_hbm;
 
@@ -885,26 +889,55 @@ void benchmark_hkv_hashtable(uint32_t block_dim) {
 
     {
       std::vector<API_Select> apis_a{
-        API_Select::insert_or_assign,
-        API_Select::find,
-        API_Select::find_or_insert,
-        API_Select::assign,
-        API_Select::assign_values,
+          API_Select::insert_or_assign, API_Select::find,
+          API_Select::find_or_insert,   API_Select::assign,
+          API_Select::assign_values,
       };
 
       std::vector<API_Select> apis_b{
-        API_Select::export_batch,
-        API_Select::export_batch_if,
-        API_Select::export_batch_if_v2,
+          API_Select::export_batch,
+          API_Select::export_batch_if,
+          API_Select::export_batch_if_v2,
       };
-      
+
       cout << "### On HBM+HMEM hybrid mode: " << endl;
       test_mode = Test_Mode::hybrid;
+
+      print_configuration(32, 256 * 1024 * 1024UL, 16);
+      print_title_hybrid_a();
+      test_main(apis_a, 32, 256 * 1024 * 1024UL, key_num_per_op, 16);
+      print_title_hybrid_b();
+      test_main(apis_b, 32, 256 * 1024 * 1024UL, key_num_per_op, 16);
+
       print_configuration(64, 128 * 1024 * 1024UL, 16);
       print_title_hybrid_a();
       test_main(apis_a, 64, 128 * 1024 * 1024UL, key_num_per_op, 16);
       print_title_hybrid_b();
       test_main(apis_b, 64, 128 * 1024 * 1024UL, key_num_per_op, 16);
+
+      print_configuration(128, 64 * 1024 * 1024UL, 16);
+      print_title_hybrid_a();
+      test_main(apis_a, 128, 64 * 1024 * 1024UL, key_num_per_op, 16);
+      print_title_hybrid_b();
+      test_main(apis_b, 128, 64 * 1024 * 1024UL, key_num_per_op, 16);
+
+      print_configuration(256, 32 * 1024 * 1024UL, 16);
+      print_title_hybrid_a();
+      test_main(apis_a, 256, 32 * 1024 * 1024UL, key_num_per_op, 16);
+      print_title_hybrid_b();
+      test_main(apis_b, 256, 32 * 1024 * 1024UL, key_num_per_op, 16);
+
+      print_configuration(512, 16 * 1024 * 1024UL, 16);
+      print_title_hybrid_a();
+      test_main(apis_a, 512, 16 * 1024 * 1024UL, key_num_per_op, 16);
+      print_title_hybrid_b();
+      test_main(apis_b, 512, 16 * 1024 * 1024UL, key_num_per_op, 16);
+
+      print_configuration(1024, 8 * 1024 * 1024UL, 16);
+      print_title_hybrid_a();
+      test_main(apis_a, 1024, 8 * 1024 * 1024UL, key_num_per_op, 16);
+      print_title_hybrid_b();
+      test_main(apis_b, 1024, 8 * 1024 * 1024UL, key_num_per_op, 16);
 
       print_configuration(64, 512 * 1024 * 1024UL, 32);
       print_title_hybrid_a();
@@ -944,16 +977,15 @@ int32_t main(int32_t argc, char* argv[]) {
     device_id = (device_id_env != nullptr) ? std::stoi(device_id_env) : 0;
   } catch (...) {
     device_id = 0;
-    std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0" << std::endl;
+    std::cout << "set env HKV_TEST_DEVICE error, using default device_id 0"
+              << std::endl;
   }
   NPU_CHECK(aclrtSetDevice(device_id));
   auto ascendc_platform =
       platform_ascendc::PlatformAscendCManager::GetInstance();
-  HKV_CHECK(ascendc_platform != nullptr,
-            "Get ascendc platform info failed!");
+  HKV_CHECK(ascendc_platform != nullptr, "Get ascendc platform info failed!");
   uint32_t block_dim = ascendc_platform->GetCoreNumAiv();
-  std::cout << "Soc version:" << aclrtGetSocName()
-            << " device_id:" << device_id
+  std::cout << "Soc version:" << aclrtGetSocName() << " device_id:" << device_id
             << " aiv_num: " << block_dim << std::endl;
   query_memory();
 

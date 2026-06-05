@@ -18,11 +18,11 @@
 #define ASCENDC_INSERT_OR_ASSIGN_KERNEL_H_
 
 #include <cstdint>
+#include "kernel_operator.h"
 #include "score_functor.h"
 #include "simt_vf_dispatcher.h"
 #include "types.h"
 #include "utils.h"
-#include "kernel_operator.h"
 
 namespace npu {
 namespace hkv {
@@ -903,6 +903,72 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM_2048) inline void write_key_vf(
     if (d_dst_keys[i] != nullptr) {
       *(d_dst_keys[i]) = keys[i];
     }
+  }
+}
+
+template <class K, class V, bool UNLOCK_KEY>
+__global__ __vector__ void write_with_half_ub_kernel(
+    uint32_t former_num, uint64_t former_core_move_num,
+    uint64_t tail_core_move_num, uint32_t num_tiles, uint32_t dim,
+    __gm__ K* keys, __gm__ V* values, uint64_t n,
+    __gm__ V* __gm__* d_dst_values, __gm__ K* __gm__* d_dst_keys) {
+  uint64_t cur_block_idx = GetBlockIdx();
+  uint64_t core_start_idx = 0;
+  uint64_t core_move_count = 0;
+  if (cur_block_idx < former_num) {
+    core_start_idx = cur_block_idx * former_core_move_num;
+    core_move_count = former_core_move_num;
+  } else {
+    core_start_idx = former_num * former_core_move_num +
+                     (cur_block_idx - former_num) * tail_core_move_num;
+    core_move_count = tail_core_move_num;
+  }
+
+  AscendC::TPipe pipe;
+  AscendC::TQueBind<AscendC::TPosition::VECIN, AscendC::TPosition::VECOUT, 0>
+      move_queue;
+
+  pipe.InitBuffer(move_queue, DOUBLE_BUFFER, num_tiles * sizeof(V) * dim);
+  AscendC::GlobalTensor<V> src_values_gm;
+  AscendC::GlobalTensor<V> dst_values_gm;
+  AscendC::LocalTensor<V> move_local;
+  DataCopyPadExtParams<V> pad_params{true, 0, 0, 0};
+
+  src_values_gm.SetGlobalBuffer(values);
+  DataCopyExtParams copy_out_params{1, static_cast<uint32_t>(dim * sizeof(V)),
+                                    0, 0, 0};
+  uint64_t core_max_idx = core_start_idx + core_move_count;
+  for (uint64_t i = core_start_idx; i < core_max_idx; i += num_tiles) {
+    uint32_t move_in_num_once =
+        i + num_tiles > core_max_idx ? core_max_idx - i : num_tiles;
+    DataCopyExtParams copy_in_params{
+        1, static_cast<uint32_t>(move_in_num_once * dim * sizeof(V)), 0, 0, 0};
+
+    move_queue.AllocTensor<V>(move_local);
+    AscendC::DataCopyPad(move_local, src_values_gm[i * dim], copy_in_params,
+                         pad_params);
+    move_queue.EnQue<V>(move_local);
+
+    move_queue.DeQue<V>(move_local);
+    for (uint32_t move_idx = 0; move_idx < move_in_num_once; move_idx++) {
+      __gm__ V* dst_value = d_dst_values[i + move_idx];
+      if (dst_value == nullptr) {
+        continue;
+      }
+
+      dst_values_gm.SetGlobalBuffer(dst_value);
+      AscendC::DataCopyPad(dst_values_gm, move_local[move_idx * dim],
+                           copy_out_params);
+    }
+
+    move_queue.FreeTensor(move_local);
+  }
+
+  if constexpr (UNLOCK_KEY) {
+    const uint32_t thread_all = THREAD_NUM_2048 * GetBlockNum();
+
+    asc_vf_call<write_key_vf<K>>(dim3{THREAD_NUM_2048}, n, keys, d_dst_keys,
+                                 thread_all, GetBlockIdx());
   }
 }
 
