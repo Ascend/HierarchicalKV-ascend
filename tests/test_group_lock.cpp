@@ -22,8 +22,8 @@
 #include <thread>
 #include <vector>
 #include "acl/acl.h"
-#include "hkv_hashtable.h"
 #include "group_lock.h"
+#include "hkv_hashtable.h"
 #include "test_util.h"
 
 using namespace npu::hkv;
@@ -38,6 +38,7 @@ class GroupSharedMutexTest : public ::testing::Test {
 // Test the basic functionality of the group_shared_mutex
 TEST_F(GroupSharedMutexTest, BasicFunctionality) {
   group_shared_mutex mutex;
+  mutex.init();
   ASSERT_EQ(mutex.read_count(), 0);
   ASSERT_EQ(mutex.update_count(), 0);
 
@@ -97,6 +98,7 @@ TEST_F(GroupSharedMutexTest, BasicFunctionality) {
 
 TEST_F(GroupSharedMutexTest, AdvancedFunctionalityMultiStream) {
   group_shared_mutex mutex;
+  mutex.init();
   std::atomic<bool> multiple_read{false};
   std::atomic<bool> multiple_update{false};
 
@@ -190,6 +192,7 @@ TEST_F(GroupSharedMutexTest, AdvancedFunctionalityMultiStream) {
 
 TEST_F(GroupSharedMutexTest, AdvancedFunctionalitySingleStream) {
   group_shared_mutex mutex;
+  mutex.init();
   std::atomic<bool> multiple_read{false};
   std::atomic<bool> multiple_update{false};
 
@@ -269,6 +272,7 @@ TEST_F(GroupSharedMutexTest, AdvancedFunctionalitySingleStream) {
 
 TEST_F(GroupSharedMutexTest, LockExclusivity) {
   group_shared_mutex mutex;
+  mutex.init();
   std::atomic<bool> read_held{false};
   std::atomic<bool> update_held{false};
 
@@ -315,6 +319,7 @@ TEST_F(GroupSharedMutexTest, LockExclusivity) {
 
 TEST_F(GroupSharedMutexTest, MultiThreadedConcurrent) {
   group_shared_mutex mutex;
+  mutex.init();
   const int NUM_THREADS = 10;
   std::atomic<int> read_acquired{0};
   std::atomic<int> update_acquired{0};

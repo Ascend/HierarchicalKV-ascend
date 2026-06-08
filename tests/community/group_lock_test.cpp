@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+#include "group_lock.h"
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
@@ -24,7 +25,6 @@
 #include <thread>
 #include <vector>
 #include "acl/acl.h"
-#include "group_lock.h"
 #include "test_util.h"
 
 using namespace npu::hkv;
@@ -52,6 +52,7 @@ int32_t get_test_device_id() {
 TEST(GroupSharedMutexTest, basic_functionality) {
   init_env();
   group_shared_mutex mutex;
+  mutex.init();
   ASSERT_EQ(mutex.read_count(), 0);
   ASSERT_EQ(mutex.update_count(), 0);
 
@@ -97,6 +98,7 @@ TEST(GroupSharedMutexTest, basic_functionality) {
 TEST(GroupSharedMutexTest, advanced_functionality_single_stream) {
   init_env();
   group_shared_mutex mutex;
+  mutex.init();
   std::atomic<bool> multiple_read{false};
   std::atomic<bool> multiple_update{false};
   const int32_t device_id = get_test_device_id();
@@ -171,6 +173,7 @@ TEST(GroupSharedMutexTest, advanced_functionality_single_stream) {
 TEST(GroupSharedMutexTest, advanced_functionality_multi_stream) {
   init_env();
   group_shared_mutex mutex;
+  mutex.init();
   std::atomic<bool> multiple_read{false};
   std::atomic<bool> multiple_update{false};
   const int32_t device_id = get_test_device_id();
